@@ -1,0 +1,16 @@
+node_modules/
+.npm-cache/
+out/
+dist/
+dist-electron/
+release/
+coverage/
+.vite/
+.svelte-kit/
+.codex-profiles/
+.symphony/
+*.log
+*.local
+*.tsbuildinfo
+playwright-report/
+test-results/

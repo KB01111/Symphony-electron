@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+:root {
+  color: oklch(0.22 0.01 75);
+  background: oklch(0.96 0.008 80);
+  font-family:
+    "Segoe UI Variable Text",
+    "Segoe UI",
+    system-ui,
+    -apple-system,
+    sans-serif;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background:
+    linear-gradient(180deg, oklch(0.985 0.007 92), oklch(0.945 0.009 80)),
+    oklch(0.96 0.008 80);
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+* {
+  box-sizing: border-box;
+}
+

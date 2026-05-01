@@ -1,0 +1,57 @@
+{
+  "name": "symphony-electron",
+  "version": "0.1.0",
+  "description": "Windows-first Electron control plane for orchestrating Codex app-server runs from Linear work.",
+  "type": "module",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "start": "electron-vite preview",
+    "build": "npm run typecheck && electron-vite build",
+    "package": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ui": "playwright test",
+    "typecheck": "svelte-check --tsconfig ./tsconfig.web.json && tsc -p tsconfig.node.json --noEmit",
+    "typecheck:tsgo": "tsgo --project tsconfig.node.json --noEmit",
+    "lint": "npm run typecheck"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.1.13",
+    "clsx": "^2.1.1",
+    "lucide-svelte": "^0.468.0",
+    "svelte": "^5.38.0",
+    "tailwind-merge": "^2.6.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "@playwright/test": "^1.56.0",
+    "@tsconfig/svelte": "^5.0.4",
+    "@types/node": "^22.10.2",
+    "@typescript/native-preview": "7.0.0-dev.20260421.2",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^3.0.0",
+    "svelte-check": "^4.1.1",
+    "tailwindcss": "^4.1.13",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3",
+    "vitest": "^2.1.8"
+  },
+  "build": {
+    "appId": "dev.bridgehammer.symphony-electron",
+    "productName": "Symphony Electron",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    }
+  }
+}
