@@ -137,7 +137,7 @@ export class OrchestrationService {
       const health = await this.options.checkProfileHealth(profile);
       if (health.ok) return profile;
     }
-    return profiles[0] ?? null;
+    return null;
   }
 
   private scheduleNext(): SchedulerSnapshot {
