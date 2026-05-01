@@ -88,7 +88,7 @@ export class OrchestrationService {
         }
         try {
           const run = await this.options.startRun(task, profile);
-          startedRuns.push({ id: run.id, taskId: run.taskId });
+          startedRuns.push({ id: run.id, taskId: run.taskId, profileId: run.profileId });
           runningTaskIds.add(task.id);
           this.retryQueue.delete(task.id);
           slots -= 1;

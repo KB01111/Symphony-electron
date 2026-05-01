@@ -33,3 +33,17 @@ test("rejects app-server requests when no handler is registered", async () => {
   expect(response.id).toBe("approval-1");
   expect(response.error.message).toContain("No handler");
 });
+
+test("allows only one app-server request handler at a time", () => {
+  const client = new CodexJsonRpcClient({
+    write: () => undefined,
+    close: () => undefined
+  });
+
+  const unsubscribe = client.onRequest(() => ({ ok: true }));
+
+  expect(() => client.onRequest(() => ({ ok: false }))).toThrow(/already registered/);
+
+  unsubscribe();
+  expect(() => client.onRequest(() => ({ ok: true }))).not.toThrow();
+});

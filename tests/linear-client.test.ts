@@ -152,3 +152,32 @@ test("adds comments and transitions issues by workflow state name", async () => 
   expect(operations.some((operation) => operation.includes("issueUpdate"))).toBe(true);
 });
 
+test("caches workflow states for repeated transitions", async () => {
+  let stateFetches = 0;
+  const client = new LinearClient({
+    fetch: async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { query: string };
+      if (body.query.includes("workflowStates")) {
+        stateFetches += 1;
+        return new Response(
+          JSON.stringify({
+            data: {
+              workflowStates: {
+                nodes: [{ id: "state-review", name: "Human Review", type: "started" }]
+              }
+            }
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({ data: { issueUpdate: { success: true } } }), { status: 200 });
+    }
+  });
+  const config = { apiKey: "lin_test", teamKey: "ENG", activeStateNames: ["Ready"] };
+
+  await client.transitionIssue(config, "lin-1", "Human Review", "ENG");
+  await client.transitionIssue(config, "lin-2", "Human Review", "ENG");
+
+  expect(stateFetches).toBe(1);
+});
+

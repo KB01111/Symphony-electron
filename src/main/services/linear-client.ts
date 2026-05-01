@@ -67,6 +67,8 @@ interface LinearMutationResponse {
 
 export class LinearClient {
   private readonly fetchImpl: FetchLike;
+  private readonly workflowStateCache = new Map<string, { expiresAt: number; states: LinearWorkflowState[] }>();
+  private readonly workflowStateCacheTtlMs = 5 * 60_000;
 
   constructor(options: { fetch?: FetchLike } = {}) {
     this.fetchImpl = options.fetch ?? fetch;
@@ -121,6 +123,11 @@ export class LinearClient {
   }
 
   async listWorkflowStates(config: LinearConfig, teamKey?: string): Promise<LinearWorkflowState[]> {
+    const cacheKey = workflowStateCacheKey(config, teamKey);
+    const cached = this.workflowStateCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.states;
+    }
     const payload: LinearWorkflowStatesResponse = await this.graphql(config, {
       query: `
         query SymphonyWorkflowStates($filter: WorkflowStateFilter) {
@@ -133,7 +140,16 @@ export class LinearClient {
         filter: teamKey ? { team: { key: { eq: teamKey } } } : undefined
       }
     });
-    return payload.data?.workflowStates?.nodes ?? [];
+    const states = payload.data?.workflowStates?.nodes ?? [];
+    this.workflowStateCache.set(cacheKey, {
+      states,
+      expiresAt: Date.now() + this.workflowStateCacheTtlMs
+    });
+    return states;
+  }
+
+  clearWorkflowStateCache(): void {
+    this.workflowStateCache.clear();
   }
 
   async addComment(config: LinearConfig, issueId: string, body: string): Promise<void> {
@@ -239,4 +255,8 @@ export class LinearClient {
     };
     return task;
   }
+}
+
+function workflowStateCacheKey(config: LinearConfig, teamKey?: string): string {
+  return [config.teamKey ?? teamKey ?? "", config.projectName ?? "", config.projectSlug ?? ""].join("|");
 }

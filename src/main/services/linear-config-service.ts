@@ -31,7 +31,7 @@ export class LinearConfigService {
     const normalized: LinearConfig = {
       apiKey: config.apiKey.trim(),
       activeStateNames: config.activeStateNames.map((state) => state.trim()).filter(Boolean),
-      terminalStateNames: (config.terminalStateNames ?? defaultConfig.terminalStateNames).map((state) => state.trim()).filter(Boolean),
+      terminalStateNames: (config.terminalStateNames ?? defaultConfig.terminalStateNames!).map((state) => state.trim()).filter(Boolean),
       inProgressStateName: config.inProgressStateName?.trim() || "In Progress",
       humanReviewStateName: config.humanReviewStateName?.trim() || "Human Review",
       pollIntervalSeconds: Math.max(15, Number(config.pollIntervalSeconds) || 60),

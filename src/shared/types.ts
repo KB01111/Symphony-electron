@@ -232,6 +232,7 @@ export interface SymphonyApi {
   };
   events: {
     onRunEvent(callback: (event: RunEvent) => void): () => void;
+    onTranscriptItem(callback: (item: RunTranscriptItem) => void): () => void;
     onScheduler(callback: (snapshot: SchedulerSnapshot) => void): () => void;
   };
 }

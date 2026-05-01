@@ -1,11 +1,14 @@
 import { BrowserWindow, ipcMain } from "electron";
 import type { AppController } from "./app-controller.js";
 import type { LinearConfig, Task } from "../shared/types.js";
+import { eventToTranscriptItem } from "../shared/transcript.js";
 
 export function registerIpc(controller: AppController): void {
   controller.eventLog.onAppend((event) => {
+    const transcriptItem = eventToTranscriptItem(event);
     for (const window of BrowserWindow.getAllWindows()) {
       window.webContents.send("events:runEvent", event);
+      window.webContents.send("events:transcriptItem", transcriptItem);
     }
   });
   controller.scheduler.onSnapshot((snapshot) => {

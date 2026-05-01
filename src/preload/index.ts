@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { CreateProfileInput, LinearConfig, RunEvent, SchedulerSnapshot, SymphonyApi, Task } from "../shared/types.js";
+import type { CreateProfileInput, LinearConfig, RunEvent, RunTranscriptItem, SchedulerSnapshot, SymphonyApi, Task } from "../shared/types.js";
 
 function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
   return ipcRenderer.invoke(channel, ...args) as Promise<T>;
@@ -59,6 +59,11 @@ const api: SymphonyApi = {
       const listener = (_event: Electron.IpcRendererEvent, value: RunEvent) => callback(value);
       ipcRenderer.on("events:runEvent", listener);
       return () => ipcRenderer.removeListener("events:runEvent", listener);
+    },
+    onTranscriptItem: (callback: (item: RunTranscriptItem) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, value: RunTranscriptItem) => callback(value);
+      ipcRenderer.on("events:transcriptItem", listener);
+      return () => ipcRenderer.removeListener("events:transcriptItem", listener);
     },
     onScheduler: (callback: (snapshot: SchedulerSnapshot) => void) => {
       const listener = (_event: Electron.IpcRendererEvent, value: SchedulerSnapshot) => callback(value);

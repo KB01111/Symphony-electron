@@ -79,15 +79,20 @@
   $: pendingApprovals = approvals.filter((approval) => approval.status === "pending");
 
   let cleanupRunEvents: (() => void) | undefined;
+  let cleanupTranscriptEvents: (() => void) | undefined;
   let cleanupSchedulerEvents: (() => void) | undefined;
 
   onMount(() => {
     cleanupRunEvents = api.events.onRunEvent((event) => {
       if (event.runId === selectedRunId) {
         events = [...events, event];
-        transcript = [...transcript, eventToTranscript(event)];
       }
       void refreshLight();
+    });
+    cleanupTranscriptEvents = api.events.onTranscriptItem((item) => {
+      if (item.runId === selectedRunId) {
+        transcript = [...transcript, item];
+      }
     });
     cleanupSchedulerEvents = api.events.onScheduler((snapshot) => {
       scheduler = snapshot;
@@ -97,6 +102,7 @@
 
   onDestroy(() => {
     cleanupRunEvents?.();
+    cleanupTranscriptEvents?.();
     cleanupSchedulerEvents?.();
   });
 
@@ -283,24 +289,6 @@
     }
   }
 
-  function eventToTranscript(event: RunEvent): RunTranscriptItem {
-    const payload = event.payload as { delta?: string } | undefined;
-    const role = event.type.includes("agentMessage")
-      ? "agent"
-      : event.type.includes("reasoning")
-        ? "reasoning"
-        : event.type.includes("tool") || event.type.includes("command") || event.type.includes("stdout") || event.type.includes("stderr")
-          ? "tool"
-          : "system";
-    return {
-      id: event.id,
-      runId: event.runId,
-      timestamp: event.timestamp,
-      role,
-      title: event.type.replace(/^codex\./, ""),
-      text: event.message ?? payload?.delta ?? (event.payload ? JSON.stringify(event.payload, null, 2) : "")
-    };
-  }
 </script>
 
 <main class="min-h-screen bg-[oklch(0.955_0.012_80)] text-stone-950">

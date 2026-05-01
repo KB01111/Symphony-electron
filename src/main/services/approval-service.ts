@@ -50,12 +50,8 @@ export class ApprovalService {
     if (index < 0) {
       throw new Error(`Unknown approval: ${approvalId}`);
     }
-    const current = approvals[index];
-    if (!current) {
-      throw new Error(`Unknown approval: ${approvalId}`);
-    }
     const updated: ApprovalRequest = {
-      ...current,
+      ...approvals[index]!,
       status,
       resolvedAt: isoNow()
     };

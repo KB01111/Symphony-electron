@@ -2,7 +2,8 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
-import type { ApprovalRequest, Profile, Run, RunEvent, RunTranscriptItem, Task } from "../../shared/types.js";
+import type { ApprovalRequest, Profile, Run, RunTranscriptItem, Task } from "../../shared/types.js";
+import { eventToTranscriptItem } from "../../shared/transcript.js";
 import { FileStateStore } from "./file-state.js";
 import { JsonlEventLog } from "./event-log.js";
 import { isoNow } from "./time.js";
@@ -91,7 +92,7 @@ export class RunService {
   }
 
   async getTranscript(runId: string): Promise<RunTranscriptItem[]> {
-    return (await this.eventLog.replay(runId)).map((event) => eventToTranscript(event));
+    return (await this.eventLog.replay(runId)).map((event) => eventToTranscriptItem(event));
   }
 
   async get(runId: string): Promise<Run> {
@@ -270,32 +271,4 @@ function approvalResponse(kind: ApprovalRequest["kind"], approved: boolean): unk
     return { answers: {} };
   }
   return { decision: approved ? "accept" : "decline" };
-}
-
-function eventToTranscript(event: RunEvent): RunTranscriptItem {
-  const payload = event.payload as Record<string, unknown> | undefined;
-  const delta = typeof payload?.delta === "string" ? payload.delta : undefined;
-  const role: RunTranscriptItem["role"] = event.type.includes("agentMessage")
-    ? "agent"
-    : event.type.includes("reasoning")
-      ? "reasoning"
-      : event.type.includes("command") || event.type.includes("tool") || event.type.includes("stdout") || event.type.includes("stderr")
-        ? "tool"
-        : event.type.startsWith("run.")
-          ? "system"
-          : "system";
-  return {
-    id: event.id,
-    runId: event.runId,
-    timestamp: event.timestamp,
-    role,
-    title: event.type.replace(/^codex\./, ""),
-    text: event.message ?? delta ?? stringifyPayload(event.payload)
-  };
-}
-
-function stringifyPayload(payload: unknown): string {
-  if (payload === undefined || payload === null) return "";
-  if (typeof payload === "string") return payload;
-  return JSON.stringify(payload, null, 2);
 }

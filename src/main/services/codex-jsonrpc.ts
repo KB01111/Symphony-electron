@@ -50,7 +50,7 @@ export class CodexJsonRpcClient {
   private nextId = 1;
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
   private readonly notifications = new Set<(message: JsonRpcNotification) => void>();
-  private readonly requestHandlers = new Set<ServerRequestHandler>();
+  private requestHandler: ServerRequestHandler | null = null;
   private readonly buffer = new JsonRpcLineBuffer();
 
   constructor(private readonly transport: JsonRpcTransport) {}
@@ -88,8 +88,15 @@ export class CodexJsonRpcClient {
   }
 
   onRequest(callback: ServerRequestHandler): () => void {
-    this.requestHandlers.add(callback);
-    return () => this.requestHandlers.delete(callback);
+    if (this.requestHandler) {
+      throw new Error("A request handler is already registered.");
+    }
+    this.requestHandler = callback;
+    return () => {
+      if (this.requestHandler === callback) {
+        this.requestHandler = null;
+      }
+    };
   }
 
   respond(id: JsonRpcId, result: unknown): void {
@@ -134,13 +141,12 @@ export class CodexJsonRpcClient {
   }
 
   private async acceptServerRequest(request: JsonRpcRequest): Promise<void> {
-    const [handler] = this.requestHandlers;
-    if (!handler) {
+    if (!this.requestHandler) {
       this.reject(request.id, -32601, `No handler registered for app-server request ${request.method}`);
       return;
     }
     try {
-      this.respond(request.id, await handler(request));
+      this.respond(request.id, await this.requestHandler(request));
     } catch (error) {
       this.reject(request.id, -32000, (error as Error).message);
     }
