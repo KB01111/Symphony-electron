@@ -7,6 +7,8 @@ import { isoNow } from "./time.js";
 export type RunEventInput = Omit<Partial<RunEvent>, "id" | "runId" | "timestamp"> & Pick<RunEvent, "type">;
 
 export class JsonlEventLog {
+  private readonly listeners = new Set<(event: RunEvent) => void>();
+
   constructor(private readonly root: string) {}
 
   async append(runId: string, input: RunEventInput): Promise<RunEvent> {
@@ -19,7 +21,15 @@ export class JsonlEventLog {
     const filePath = this.filePath(runId);
     await mkdir(path.dirname(filePath), { recursive: true });
     await writeFile(filePath, `${JSON.stringify(event)}\n`, { encoding: "utf8", flag: "a" });
+    for (const listener of this.listeners) {
+      listener(event);
+    }
     return event;
+  }
+
+  onAppend(listener: (event: RunEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
 
   async replay(runId: string): Promise<RunEvent[]> {

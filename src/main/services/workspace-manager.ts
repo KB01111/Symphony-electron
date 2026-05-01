@@ -5,11 +5,16 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { Profile, Task, WorkspaceRef } from "../../shared/types.js";
+import { WorkflowService } from "./workflow-service.js";
 
 const execFileAsync = promisify(execFile);
 
 export class WorkspaceManager {
-  constructor(private readonly options: { workflowPath?: string } = {}) {}
+  private readonly workflow: WorkflowService | undefined;
+
+  constructor(private readonly options: { workflowPath?: string; workflow?: WorkflowService } = {}) {
+    this.workflow = options.workflow ?? (options.workflowPath ? new WorkflowService(options.workflowPath) : undefined);
+  }
 
   async prepareWorkspace(profile: Profile, task: Task): Promise<WorkspaceRef> {
     await mkdir(profile.workspaceRoot, { recursive: true });
@@ -50,13 +55,19 @@ export class WorkspaceManager {
   }
 
   private async renderWorkflowPrompt(task: Task): Promise<string> {
-    const template = await this.loadWorkflowTemplate();
-    return template
-      .replaceAll("{{identifier}}", task.identifier)
-      .replaceAll("{{title}}", task.title)
-      .replaceAll("{{description}}", task.description)
-      .replaceAll("{{url}}", task.url ?? "")
-      .replaceAll("{{task_id}}", task.id);
+    if (this.workflow) {
+      return this.workflow.renderPrompt(task);
+    }
+    return [
+      "# Symphony Task",
+      "",
+      `Identifier: ${task.identifier}`,
+      `Title: ${task.title}`,
+      "",
+      task.description,
+      "",
+      "Work inside this isolated workspace. Preserve unrelated changes. Report verification clearly."
+    ].join("\n");
   }
 
   private async loadWorkflowTemplate(): Promise<string> {
