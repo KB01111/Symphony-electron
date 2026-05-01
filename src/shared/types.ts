@@ -76,6 +76,51 @@ export interface RunEvent {
   payload?: unknown;
 }
 
+export type OrchestratorMode = "manual" | "autonomous";
+
+export interface AutomationPolicy {
+  autoStart: boolean;
+  autoCreateHandoff: boolean;
+  autoWriteTrackerUpdates: boolean;
+  maxConcurrentRuns: number;
+  pollIntervalSeconds: number;
+  stallTimeoutSeconds: number;
+  maxRetryBackoffSeconds: number;
+  terminalStateNames: string[];
+  requireApprovalFor: Array<"command" | "patch" | "network" | "filesystem" | "handoff" | "merge">;
+}
+
+export interface RetryQueueEntry {
+  taskId: string;
+  attempts: number;
+  nextAttemptAt: string;
+  lastError: string;
+}
+
+export interface ActiveRunClaim {
+  taskId: string;
+  runId: string;
+  identifier: string;
+  startedAt: string;
+  lastEventAt?: string;
+}
+
+export interface OrchestratorState {
+  mode: OrchestratorMode;
+  paused: boolean;
+  policy: AutomationPolicy;
+  activeClaims: ActiveRunClaim[];
+  retryQueue: RetryQueueEntry[];
+  lastTickAt?: string;
+  lastError?: string;
+}
+
+export interface OrchestratorSnapshot {
+  state: OrchestratorState;
+  queuedTaskIds: string[];
+  activeRuns: RunReference[];
+}
+
 export interface ApprovalRequest {
   id: string;
   runId: string;
@@ -124,6 +169,14 @@ export interface SymphonyApi {
     retry(runId: string): Promise<Run>;
     getEvents(runId: string): Promise<RunEvent[]>;
     respondToApproval(requestId: string, approved: boolean): Promise<void>;
+  };
+  orchestrator: {
+    snapshot(): Promise<OrchestratorSnapshot>;
+    start(): Promise<OrchestratorState>;
+    pause(): Promise<OrchestratorState>;
+    resume(): Promise<OrchestratorState>;
+    tick(): Promise<OrchestratorSnapshot>;
+    updatePolicy(policy: Partial<AutomationPolicy>): Promise<OrchestratorState>;
   };
   logs: {
     tail(runId: string): Promise<RunEvent[]>;
