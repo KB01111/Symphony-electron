@@ -2,23 +2,33 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
-import type { Profile, Run, Task } from "../../shared/types.js";
+import type { ApprovalRequest, Profile, Run, RunEvent, RunTranscriptItem, Task } from "../../shared/types.js";
 import { FileStateStore } from "./file-state.js";
 import { JsonlEventLog } from "./event-log.js";
 import { isoNow } from "./time.js";
 import { WorkspaceManager } from "./workspace-manager.js";
 import { CodexAppServerProcess } from "./codex-app-server.js";
+import { ApprovalService } from "./approval-service.js";
+import type { JsonRpcRequest } from "./codex-jsonrpc.js";
 
 const execFileAsync = promisify(execFile);
+
+interface RunServiceOptions {
+  approvals?: ApprovalService;
+  onRunNeedsReview?(run: Run): Promise<void>;
+  onLinearGraphql?(payload: { query: string; variables?: Record<string, unknown> }): Promise<unknown>;
+}
 
 export class RunService {
   private readonly store: FileStateStore<Run[]>;
   private readonly active = new Map<string, CodexAppServerProcess>();
+  private readonly approvalWaiters = new Map<string, { kind: ApprovalRequest["kind"]; resolve(response: unknown): void }>();
 
   constructor(
     appDataRoot: string,
     private readonly eventLog: JsonlEventLog,
-    private readonly workspaceManager: WorkspaceManager
+    private readonly workspaceManager: WorkspaceManager,
+    private readonly options: RunServiceOptions = {}
   ) {
     this.store = new FileStateStore<Run[]>(path.join(appDataRoot, "state", "runs.json"), []);
   }
@@ -65,6 +75,25 @@ export class RunService {
     return this.start(task, profile);
   }
 
+  async listApprovals(runId?: string): Promise<ApprovalRequest[]> {
+    const approvals = this.options.approvals;
+    if (!approvals) return [];
+    return runId ? approvals.listForRun(runId) : approvals.listPending();
+  }
+
+  async respondToApproval(requestId: string, approved: boolean): Promise<void> {
+    const approvals = this.options.approvals;
+    const approval = approvals ? await approvals.resolve(requestId, approved) : undefined;
+    const waiter = this.approvalWaiters.get(requestId);
+    if (!waiter) return;
+    this.approvalWaiters.delete(requestId);
+    waiter.resolve(approvalResponse(waiter.kind, approved));
+  }
+
+  async getTranscript(runId: string): Promise<RunTranscriptItem[]> {
+    return (await this.eventLog.replay(runId)).map((event) => eventToTranscript(event));
+  }
+
   async get(runId: string): Promise<Run> {
     const run = (await this.list()).find((candidate) => candidate.id === runId);
     if (!run) {
@@ -88,7 +117,13 @@ export class RunService {
         cwd: workspace.path,
         onStdout: (chunk) => void this.eventLog.append(run.id, { type: "codex.stdout", stream: "stdout", message: chunk }),
         onStderr: (chunk) => void this.eventLog.append(run.id, { type: "codex.stderr", stream: "stderr", message: chunk }),
-        onNotification: (method, params) => void this.eventLog.append(run.id, { type: `codex.${method}`, payload: params }),
+        onNotification: (method, params) => {
+          void this.eventLog.append(run.id, { type: `codex.${method}`, payload: params });
+          if (method === "turn/completed") {
+            void this.handleTurnCompleted(run.id);
+          }
+        },
+        onServerRequest: (request) => this.handleServerRequest(run.id, request),
         onExit: (exitCode, signal) => {
           this.active.delete(run.id);
           void this.handleExit(run.id, exitCode, signal);
@@ -100,7 +135,12 @@ export class RunService {
         ...(process.pid ? { pid: process.pid } : {}),
         updatedAt: isoNow()
       });
-      await process.startTurn(workspace.workflowPrompt, workspace.path);
+      const started = await process.startTurn(workspace.workflowPrompt, workspace.path);
+      await this.patch(run.id, {
+        threadId: started.threadId,
+        turnId: started.turnId,
+        updatedAt: isoNow()
+      });
     } catch (error) {
       this.active.delete(run.id);
       await this.patch(run.id, {
@@ -115,7 +155,7 @@ export class RunService {
 
   private async handleExit(runId: string, exitCode: number | null, signal: NodeJS.Signals | null): Promise<void> {
     const run = await this.get(runId);
-    if (run.state === "cancelled" || run.state === "done" || run.state === "failed") return;
+    if (run.state === "cancelled" || run.state === "done" || run.state === "failed" || run.state === "review") return;
     const failed = exitCode !== 0;
     await this.patch(runId, {
       state: failed ? "failed" : "review",
@@ -123,10 +163,29 @@ export class RunService {
       ...(failed ? { failureReason: `Codex app-server exited with code ${String(exitCode)} signal ${String(signal)}.` } : {}),
       updatedAt: isoNow()
     });
+    if (!failed) {
+      const updated = await this.get(runId);
+      await this.options.onRunNeedsReview?.(updated);
+    }
     await this.eventLog.append(runId, {
       type: failed ? "run.failed" : "run.review",
       message: failed ? `Codex app-server exited with ${String(exitCode)}.` : "Codex app-server exited; run is ready for review."
     });
+  }
+
+  private async handleTurnCompleted(runId: string): Promise<void> {
+    const run = await this.get(runId);
+    if (run.state === "cancelled" || run.state === "done" || run.state === "failed" || run.state === "review") return;
+    const reviewed = await this.patch(runId, {
+      state: "review",
+      completedAt: isoNow(),
+      updatedAt: isoNow()
+    });
+    await this.eventLog.append(runId, { type: "run.review", message: "Codex turn completed; run is ready for review." });
+    await this.options.onRunNeedsReview?.(reviewed);
+    const process = this.active.get(runId);
+    this.active.delete(runId);
+    process?.close();
   }
 
   private async patch(runId: string, patch: Partial<Run>): Promise<Run> {
@@ -146,4 +205,97 @@ export class RunService {
     }
     await this.store.write(runs);
   }
+
+  private async handleServerRequest(runId: string, request: JsonRpcRequest): Promise<unknown> {
+    if (request.method === "item/tool/call") {
+      return this.handleDynamicToolCall(request);
+    }
+
+    if (request.method.includes("requestApproval") || request.method === "execCommandApproval" || request.method === "applyPatchApproval") {
+      const approval = await this.createApproval(runId, request);
+      await this.eventLog.append(runId, { type: "run.approval.requested", message: approval.title, payload: approval });
+      return new Promise((resolve) => {
+        this.approvalWaiters.set(approval.id, { kind: approval.kind, resolve });
+      });
+    }
+
+    throw new Error(`Unsupported app-server request: ${request.method}`);
+  }
+
+  private async handleDynamicToolCall(request: JsonRpcRequest): Promise<unknown> {
+    const params = request.params as { tool?: string; arguments?: unknown };
+    if (params.tool !== "linear_graphql") {
+      throw new Error(`Unsupported dynamic tool: ${String(params.tool)}`);
+    }
+    if (!this.options.onLinearGraphql) {
+      throw new Error("Linear GraphQL tool is not configured.");
+    }
+    const args = params.arguments as { query?: string; variables?: Record<string, unknown> };
+    if (!args.query) {
+      throw new Error("linear_graphql requires a query string.");
+    }
+    const payload: { query: string; variables?: Record<string, unknown> } = { query: args.query };
+    if (args.variables) {
+      payload.variables = args.variables;
+    }
+    const result = await this.options.onLinearGraphql(payload);
+    return {
+      success: true,
+      contentItems: [{ type: "inputText", text: JSON.stringify(result, null, 2) }]
+    };
+  }
+
+  private async createApproval(runId: string, request: JsonRpcRequest): Promise<ApprovalRequest> {
+    const approvals = this.options.approvals;
+    if (!approvals) {
+      throw new Error("Approval storage is not configured.");
+    }
+    const params = (request.params ?? {}) as Record<string, unknown>;
+    const kind = request.method.includes("fileChange") || request.method === "applyPatchApproval" ? "patch" : request.method.includes("tool") ? "tool" : "command";
+    const command = typeof params.command === "string" ? params.command : Array.isArray(params.command) ? params.command.join(" ") : undefined;
+    const detail = command ?? (typeof params.reason === "string" ? params.reason : JSON.stringify(params));
+    return approvals.create({
+      runId,
+      protocolRequestId: request.id,
+      kind,
+      title: kind === "patch" ? "Approve file changes" : kind === "tool" ? "Approve tool request" : "Approve command",
+      detail,
+      payload: request
+    });
+  }
+}
+
+function approvalResponse(kind: ApprovalRequest["kind"], approved: boolean): unknown {
+  if (kind === "tool") {
+    return { answers: {} };
+  }
+  return { decision: approved ? "accept" : "decline" };
+}
+
+function eventToTranscript(event: RunEvent): RunTranscriptItem {
+  const payload = event.payload as Record<string, unknown> | undefined;
+  const delta = typeof payload?.delta === "string" ? payload.delta : undefined;
+  const role: RunTranscriptItem["role"] = event.type.includes("agentMessage")
+    ? "agent"
+    : event.type.includes("reasoning")
+      ? "reasoning"
+      : event.type.includes("command") || event.type.includes("tool") || event.type.includes("stdout") || event.type.includes("stderr")
+        ? "tool"
+        : event.type.startsWith("run.")
+          ? "system"
+          : "system";
+  return {
+    id: event.id,
+    runId: event.runId,
+    timestamp: event.timestamp,
+    role,
+    title: event.type.replace(/^codex\./, ""),
+    text: event.message ?? delta ?? stringifyPayload(event.payload)
+  };
+}
+
+function stringifyPayload(payload: unknown): string {
+  if (payload === undefined || payload === null) return "";
+  if (typeof payload === "string") return payload;
+  return JSON.stringify(payload, null, 2);
 }

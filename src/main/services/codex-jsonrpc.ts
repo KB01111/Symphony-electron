@@ -33,6 +33,8 @@ type PendingRequest = {
   reject(error: Error): void;
 };
 
+type ServerRequestHandler = (request: JsonRpcRequest) => Promise<unknown> | unknown;
+
 export class JsonRpcLineBuffer {
   private buffered = "";
 
@@ -48,6 +50,7 @@ export class CodexJsonRpcClient {
   private nextId = 1;
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
   private readonly notifications = new Set<(message: JsonRpcNotification) => void>();
+  private readonly requestHandlers = new Set<ServerRequestHandler>();
   private readonly buffer = new JsonRpcLineBuffer();
 
   constructor(private readonly transport: JsonRpcTransport) {}
@@ -84,6 +87,19 @@ export class CodexJsonRpcClient {
     return () => this.notifications.delete(callback);
   }
 
+  onRequest(callback: ServerRequestHandler): () => void {
+    this.requestHandlers.add(callback);
+    return () => this.requestHandlers.delete(callback);
+  }
+
+  respond(id: JsonRpcId, result: unknown): void {
+    this.transport.write(`${JSON.stringify({ id, result })}\n`);
+  }
+
+  reject(id: JsonRpcId, code: number, message: string, data?: unknown): void {
+    this.transport.write(`${JSON.stringify({ id, error: { code, message, data } })}\n`);
+  }
+
   close(): void {
     this.transport.close();
     for (const [id, pending] of this.pending) {
@@ -105,10 +121,28 @@ export class CodexJsonRpcClient {
       return;
     }
 
+    if ("method" in message && "id" in message) {
+      void this.acceptServerRequest(message);
+      return;
+    }
+
     if ("method" in message && !("id" in message)) {
       for (const callback of this.notifications) {
         callback(message);
       }
+    }
+  }
+
+  private async acceptServerRequest(request: JsonRpcRequest): Promise<void> {
+    const [handler] = this.requestHandlers;
+    if (!handler) {
+      this.reject(request.id, -32601, `No handler registered for app-server request ${request.method}`);
+      return;
+    }
+    try {
+      this.respond(request.id, await handler(request));
+    } catch (error) {
+      this.reject(request.id, -32000, (error as Error).message);
     }
   }
 }
