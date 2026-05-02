@@ -216,7 +216,12 @@ export class OrchestratorService {
   }
 
   private async cancelClaim(runId: string, type: string, message: string): Promise<void> {
-    await this.dependencies.terminateRun?.(runId);
+    try {
+      await this.dependencies.terminateRun?.(runId);
+    } catch {
+      // Swallow termination failures so reconciliation can continue.
+    }
+
     try {
       await this.dependencies.appendEvent(runId, { type, message });
     } catch {
