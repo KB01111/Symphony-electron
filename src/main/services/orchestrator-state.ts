@@ -15,6 +15,16 @@ export const defaultAutomationPolicy: AutomationPolicy = {
   requireApprovalFor: ["merge"]
 };
 
+/**
+ * Creates a new AutomationPolicy that does not share mutable references with the source.
+ *
+ * The returned policy is a shallow copy of `policy` where array and map fields that are
+ * commonly mutated (`terminalStateNames`, `maxConcurrentRunsByState`, `requireApprovalFor`)
+ * are cloned so modifying the result will not affect the original.
+ *
+ * @param policy - The source AutomationPolicy to clone
+ * @returns A cloned AutomationPolicy with cloned arrays and map to avoid shared references
+ */
 function cloneAutomationPolicy(policy: AutomationPolicy): AutomationPolicy {
   return {
     ...policy,

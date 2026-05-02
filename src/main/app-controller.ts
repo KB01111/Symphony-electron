@@ -253,6 +253,12 @@ export class AppController {
   }
 }
 
+/**
+ * Convert an orchestrator snapshot into the scheduler's snapshot shape.
+ *
+ * @param snapshot - The orchestrator snapshot produced by `OrchestratorService.snapshot()`
+ * @returns A SchedulerSnapshot containing `enabled`, `running`, `queuedTaskIds`, `retryQueue`, and optional `lastPollAt` and `lastError`
+ */
 function orchestratorSnapshotToSchedulerSnapshot(snapshot: Awaited<ReturnType<OrchestratorService["snapshot"]>>): SchedulerSnapshot {
   return {
     enabled: !snapshot.state.paused && snapshot.state.policy.autoStart,

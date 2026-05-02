@@ -278,20 +278,54 @@ export class OrchestratorService {
   }
 }
 
+/**
+ * Normalize a string by trimming surrounding whitespace and converting to lowercase.
+ *
+ * @param value - The input string to normalize
+ * @returns The input string with leading/trailing whitespace removed and all characters lowercased
+ */
 function normalize(value: string): string {
   return value.trim().toLowerCase();
 }
 
+/**
+ * Determines whether a task is eligible to proceed based on its blockers.
+ *
+ * For tasks whose normalized status is not `"todo"`, the task is considered eligible.
+ * For `"todo"` tasks, every blocker must have a defined `state` and that state's normalized
+ * value must be present in `terminalStateNames` for the task to be eligible.
+ *
+ * @param task - The task to evaluate for blocker gating
+ * @param terminalStateNames - Set of normalized terminal state names used to consider blockers resolved
+ * @returns `true` if the task may proceed (no unresolved blockers), `false` otherwise.
+ */
 function passesBlockerGate(task: Task, terminalStateNames: Set<string>): boolean {
   if (normalize(task.status) !== "todo") return true;
   return (task.blockers ?? []).every((blocker) => blocker.state && terminalStateNames.has(normalize(blocker.state)));
 }
 
+/**
+ * Compute the next retry timestamp using exponential backoff capped by a maximum.
+ *
+ * @param now - Reference time from which the backoff is applied
+ * @param attempts - Number of previous attempts (1-based); higher values increase the backoff
+ * @param maxBackoffSeconds - Maximum backoff duration in seconds used to cap the exponential growth
+ * @returns An ISO 8601 timestamp string for the next retry time
+ */
 function nextRetryAt(now: Date, attempts: number, maxBackoffSeconds: number): string {
   const backoffSeconds = Math.min(10 * 2 ** Math.max(attempts - 1, 0), maxBackoffSeconds);
   return new Date(now.getTime() + backoffSeconds * 1000).toISOString();
 }
 
+/**
+ * Selects the later ISO timestamp between two timestamp strings.
+ *
+ * If one argument is missing, returns the other. When both are present, returns the chronologically later timestamp by lexicographic comparison. If both are missing, returns `undefined`.
+ *
+ * @param current - Existing ISO timestamp or `undefined`
+ * @param candidate - New ISO timestamp to compare or `undefined`
+ * @returns The later ISO timestamp string, or `undefined` if neither is provided
+ */
 function newerIso(current: string | undefined, candidate: string | undefined): string | undefined {
   if (!current) return candidate;
   if (!candidate) return current;

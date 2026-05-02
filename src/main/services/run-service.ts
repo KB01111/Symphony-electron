@@ -492,10 +492,22 @@ export function approvalResponseFor(approval: ApprovalRequest, approved: boolean
   return { decision: approved ? "accept" : "decline" };
 }
 
+/**
+ * Create a protocol response object representing an approval decision.
+ *
+ * @param approved - `true` if the request was approved by an operator, `false` otherwise
+ * @returns An object with a `decision` property set to `"accept"` when `approved` is `true` and `"decline"` when `approved` is `false`
+ */
 function fallbackApprovalResponse(approved: boolean): unknown {
   return { decision: approved ? "accept" : "decline" };
 }
 
+/**
+ * Infers a proof kind from a Codex notification or protocol method name.
+ *
+ * @param method - The notification or method string to inspect
+ * @returns The matching `ProofKind` (`"test"`, `"ci"`, `"review"`, `"diff"`, or `"pr"`) if the method indicates one; otherwise `undefined`
+ */
 function inferProofKind(method: string): ProofKind | undefined {
   const normalized = method.toLowerCase();
   if (normalized.includes("test")) return "test";
@@ -506,6 +518,12 @@ function inferProofKind(method: string): ProofKind | undefined {
   return undefined;
 }
 
+/**
+ * Infers a proof status from the textual content of an arbitrary value.
+ *
+ * @param value - The value whose string form will be inspected for status keywords
+ * @returns `failed`, `passed`, `warning`, or `unknown` depending on which keywords (`failed`/`failure`/`error`, `passed`/`success`/`completed`, `warning`/`warn`) appear in the stringified `value` (case-insensitive)
+ */
 function inferProofStatus(value: unknown): ProofStatus {
   const text = stringifyProofDetail(value).toLowerCase();
   if (text.includes("failed") || text.includes("failure") || text.includes("error")) return "failed";
@@ -514,6 +532,12 @@ function inferProofStatus(value: unknown): ProofStatus {
   return "unknown";
 }
 
+/**
+ * Convert a value to a pretty-printed JSON string and truncate it to 2000 characters.
+ *
+ * @param value - The proof payload to serialize
+ * @returns The JSON representation of `value` with 2-space indentation, limited to 2000 characters
+ */
 function stringifyProofDetail(value: unknown): string {
   return (JSON.stringify(value, null, 2) ?? "").slice(0, 2000);
 }

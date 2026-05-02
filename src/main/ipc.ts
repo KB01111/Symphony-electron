@@ -3,6 +3,15 @@ import type { AppController } from "./app-controller.js";
 import type { AutomationPolicy, LinearConfig, Task } from "../shared/types.js";
 import { eventToTranscriptItem } from "../shared/transcript.js";
 
+/**
+ * Wires Electron IPC channels to controller methods and broadcasts appended event-log entries to all renderer windows.
+ *
+ * Registers a set of named ipcMain handlers (profiles, linear, workflow, scheduler, tasks, runs, orchestrator, proof, handoff, logs, health, etc.)
+ * that delegate to the provided AppController, and forwards each event appended to the controller's eventLog to every open BrowserWindow
+ * as both the original run event and a converted transcript item.
+ *
+ * @param controller - The application controller whose methods are bound to IPC channels and whose eventLog is broadcast to renderers
+ */
 export function registerIpc(controller: AppController): void {
   controller.eventLog.onAppend((event) => {
     const transcriptItem = eventToTranscriptItem(event);

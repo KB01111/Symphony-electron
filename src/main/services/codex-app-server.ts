@@ -137,6 +137,12 @@ export class CodexAppServerProcess implements CodexAppServerProcessLike {
   }
 }
 
+/**
+ * Build thread-start parameters by normalizing policies and supplying sensible defaults.
+ *
+ * @param options - Configuration for the thread start: `cwd` (workspace path); optional `approvalPolicy`, `sandbox`, `baseInstructions`, and `dynamicTools`.
+ * @returns A ThreadStartParams object with `approvalPolicy` and `sandbox` normalized, `baseInstructions` and `dynamicTools` defaulted when absent, `approvalsReviewer` set to `"auto_review"`, `serviceName` set to `"symphony-electron"`, `experimentalRawEvents` set to `false`, and `persistExtendedHistory` set to `true`.
+ */
 export function buildThreadStartParams(options: ThreadParamOptions): ThreadStartParams {
   return {
     cwd: options.cwd,
@@ -152,6 +158,11 @@ export function buildThreadStartParams(options: ThreadParamOptions): ThreadStart
   };
 }
 
+/**
+ * Provide the default dynamic tool specifications used when no custom tools are supplied.
+ *
+ * @returns An array containing the default `DynamicToolSpec` for a Linear GraphQL tool that requires a `query` string and accepts an optional `variables` object
+ */
 function defaultDynamicTools(): DynamicToolSpec[] {
   return [
     {
@@ -171,6 +182,12 @@ function defaultDynamicTools(): DynamicToolSpec[] {
   ];
 }
 
+/**
+ * Normalize an approval policy specification into an AskForApproval value.
+ *
+ * @param value - The approval policy input; either one of the strings `"untrusted"`, `"on-failure"`, `"on-request"`, `"never"`, or an object containing a `granular` key describing a granular policy.
+ * @returns The normalized `AskForApproval` value: the original allowed string, the provided granular object, or `"on-request"` when the input is not a recognized form.
+ */
 function normalizeApprovalPolicy(value: unknown): AskForApproval {
   if (value === "untrusted" || value === "on-failure" || value === "on-request" || value === "never") {
     return value;
@@ -181,6 +198,12 @@ function normalizeApprovalPolicy(value: unknown): AskForApproval {
   return "on-request";
 }
 
+/**
+ * Normalize a sandbox mode value into a valid sandbox mode.
+ *
+ * @param value - Candidate sandbox mode; accepted values are "read-only", "workspace-write", and "danger-full-access". Any other input will be treated as `"workspace-write"`.
+ * @returns The normalized sandbox mode: `"read-only"`, `"workspace-write"`, or `"danger-full-access"`, with a default of `"workspace-write"`.
+ */
 function normalizeSandbox(value: unknown): SandboxMode {
   if (value === "read-only" || value === "workspace-write" || value === "danger-full-access") {
     return value;
@@ -188,6 +211,12 @@ function normalizeSandbox(value: unknown): SandboxMode {
   return "workspace-write";
 }
 
+/**
+ * Determine the executable file and argument list for launching the app-server.
+ *
+ * @param command - Command string to parse (defaults to "codex app-server")
+ * @returns An object with `file` set to the executable name and `args` containing the arguments; ensures `--listen stdio://` is present
+ */
 function appServerCommand(command = "codex app-server"): { file: string; args: string[] } {
   const tokens = splitCommand(command);
   const [file = "codex", ...args] = tokens.length ? tokens : ["codex", "app-server"];
@@ -198,6 +227,12 @@ function appServerCommand(command = "codex app-server"): { file: string; args: s
   return { file, args: normalizedArgs };
 }
 
+/**
+ * Splits a shell-like command string into tokens, preserving quoted segments.
+ *
+ * @param command - The command string to tokenize; supports double-quoted ("..."), single-quoted ('...'), and unquoted tokens.
+ * @returns An array of non-empty tokens with surrounding quotes removed.
+ */
 function splitCommand(command: string): string[] {
   const tokens: string[] = [];
   const pattern = /"([^"]*)"|'([^']*)'|(\S+)/g;
@@ -207,6 +242,13 @@ function splitCommand(command: string): string[] {
   return tokens.filter(Boolean);
 }
 
+/**
+ * Complete the provided operation within the specified time limit or fail with a timeout error.
+ *
+ * @param promise - The operation to wait for.
+ * @param timeoutMs - Time limit in milliseconds; if less than or equal to 0, no timeout is applied.
+ * @returns The resolved value of `promise` if it completes before the timeout; rejects with an `Error` describing the timeout otherwise.
+ */
 function requestWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   if (timeoutMs <= 0) return promise;
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -218,6 +260,11 @@ function requestWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<
   });
 }
 
+/**
+ * Determines whether a value is a non-null object suitable for use as a record.
+ *
+ * @returns `true` if `value` is an object and not `null`, `false` otherwise.
+ */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
