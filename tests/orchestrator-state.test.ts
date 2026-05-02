@@ -48,6 +48,32 @@ test("updates state atomically and preserves retry entries", async () => {
   expect((await store.read()).retryQueue[0]).toMatchObject({ attempts: 2, lastError: "temporary failure" });
 });
 
+test("serializes concurrent updates so independent mutations are preserved", async () => {
+  const store = new OrchestratorStateStore(await tempRoot());
+
+  await Promise.all([
+    store.update((state) => ({
+      ...state,
+      paused: true
+    })),
+    store.update((state) => ({
+      ...state,
+      retryQueue: [
+        {
+          taskId: "linear:lin-1",
+          attempts: 1,
+          nextAttemptAt: "2026-05-02T10:05:00.000Z",
+          lastError: "temporary failure"
+        }
+      ]
+    }))
+  ]);
+
+  const state = await store.read();
+  expect(state.paused).toBe(true);
+  expect(state.retryQueue).toHaveLength(1);
+});
+
 test("backfills defaults when reading older partial orchestrator state", async () => {
   const root = await tempRoot();
   const stateDir = path.join(root, "state");

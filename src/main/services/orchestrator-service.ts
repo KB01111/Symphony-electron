@@ -11,7 +11,7 @@ type OrchestratorDependencies = {
   now?: () => Date;
 };
 
-const ACTIVE_RUN_STATES = new Set<Run["state"]>(["preparing", "running"]);
+const ACTIVE_RUN_STATES = new Set<Run["state"]>(["preparing", "running", "stalled"]);
 
 export class OrchestratorService {
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -178,16 +178,7 @@ export class OrchestratorService {
             this.schedule(snapshot.state.policy.pollIntervalSeconds);
           }
         })
-        .catch(async (error) => {
-          const current = await this.enqueueMutation(async () => {
-            const currentState = await this.dependencies.readState();
-            await this.dependencies.writeState({ ...currentState, lastError: (error as Error).message });
-            return currentState;
-          });
-          if (!this.pauseRequested && !current.paused && current.policy.autoStart) {
-            this.schedule(current.policy.pollIntervalSeconds);
-          }
-        });
+        .catch((error) => void this.recordTickFailure(error));
     }, Math.max(1, intervalSeconds) * 1000);
   }
 
@@ -205,5 +196,21 @@ export class OrchestratorService {
       () => undefined
     );
     return result;
+  }
+
+  private async recordTickFailure(error: unknown): Promise<void> {
+    let current: OrchestratorState | undefined;
+    try {
+      current = await this.enqueueMutation(async () => {
+        const currentState = await this.dependencies.readState();
+        await this.dependencies.writeState({ ...currentState, lastError: (error as Error).message });
+        return currentState;
+      });
+    } catch {
+      current = undefined;
+    }
+    if (!this.pauseRequested && current && !current.paused && current.policy.autoStart) {
+      this.schedule(current.policy.pollIntervalSeconds);
+    }
   }
 }

@@ -100,7 +100,7 @@ export class CodexJsonRpcClient {
   }
 
   respond(id: JsonRpcId, result: unknown): void {
-    this.transport.write(`${JSON.stringify({ id, result })}\n`);
+    this.transport.write(`${JSON.stringify({ id, result: result === undefined ? null : result })}\n`);
   }
 
   reject(id: JsonRpcId, code: number, message: string, data?: unknown): void {

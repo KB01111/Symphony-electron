@@ -1,5 +1,15 @@
 import path from "node:path";
-import type { CodexAccountStatus, HealthCheckResult, LinearConfig, Run, SchedulerSnapshot, Task, WorkflowSnapshot, WorkflowValidation } from "../shared/types.js";
+import type {
+  CodexAccountStatus,
+  HealthCheckResult,
+  LinearConfig,
+  Profile,
+  Run,
+  SchedulerSnapshot,
+  Task,
+  WorkflowSnapshot,
+  WorkflowValidation
+} from "../shared/types.js";
 import { ApprovalService } from "./services/approval-service.js";
 import { JsonlEventLog } from "./services/event-log.js";
 import { LinearClient } from "./services/linear-client.js";
@@ -58,9 +68,9 @@ export class AppController {
       listCandidateTasks: () => this.syncLinear(),
       listRuns: () => this.runs.list(),
       startRun: async (task) => {
-        const [profile] = await this.profiles.list();
+        const profile = await this.selectHealthyProfile();
         if (!profile) {
-          throw new Error("No Codex profile configured.");
+          throw new Error("No healthy Codex profile configured.");
         }
         return this.runs.start(task, profile);
       },
@@ -70,6 +80,17 @@ export class AppController {
 
   async saveLinearConfig(config: LinearConfig): Promise<LinearConfig> {
     return this.linearConfig.save(config);
+  }
+
+  private async selectHealthyProfile(): Promise<Profile | undefined> {
+    const profiles = await this.profiles.list();
+    for (const profile of profiles) {
+      const health = await this.profiles.checkHealth(profile.id);
+      if (health.ok) {
+        return profile;
+      }
+    }
+    return undefined;
   }
 
   async testLinearConnection(config?: LinearConfig): Promise<HealthCheckResult> {

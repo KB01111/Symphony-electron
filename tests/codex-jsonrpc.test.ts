@@ -77,6 +77,20 @@ test("client writes JSON-RPC responses for server requests", () => {
   ]);
 });
 
+test("client serializes undefined response results as null", () => {
+  const transport = {
+    write: vi.fn(),
+    close: vi.fn()
+  };
+  const client = new CodexJsonRpcClient(transport);
+
+  client.respond("approval-1", undefined);
+
+  expect(transport.write).toHaveBeenCalledTimes(1);
+  const [line] = transport.write.mock.calls[0] ?? [];
+  expect(JSON.parse(String(line))).toEqual({ id: "approval-1", result: null });
+});
+
 test("client reports malformed JSON-RPC input to caller", () => {
   const transport = {
     write: vi.fn(),
@@ -86,4 +100,3 @@ test("client reports malformed JSON-RPC input to caller", () => {
 
   expect(() => client.acceptLine("{not json")).toThrow();
 });
-

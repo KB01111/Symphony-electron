@@ -34,6 +34,7 @@ export function defaultOrchestratorState(): OrchestratorState {
 
 export class OrchestratorStateStore {
   private readonly store: FileStateStore<OrchestratorState>;
+  private updateQueue: Promise<void> = Promise.resolve();
 
   constructor(appDataRoot: string) {
     this.store = new FileStateStore<OrchestratorState>(
@@ -58,9 +59,20 @@ export class OrchestratorStateStore {
   }
 
   async update(mutator: (state: OrchestratorState) => OrchestratorState): Promise<OrchestratorState> {
-    const current = await this.read();
-    const next = mutator(current);
-    await this.write(next);
-    return next;
+    return this.enqueueUpdate(async () => {
+      const current = await this.read();
+      const next = mutator(current);
+      await this.write(next);
+      return next;
+    });
+  }
+
+  private enqueueUpdate<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.updateQueue.then(operation, operation);
+    this.updateQueue = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
   }
 }

@@ -86,9 +86,9 @@ export class RunService {
     const approvals = this.options.approvals;
     const approval = approvals ? await approvals.resolve(requestId, approved) : undefined;
     const waiter = this.approvalWaiters.get(requestId);
-    if (waiter && approval) {
+    if (waiter) {
       this.approvalWaiters.delete(requestId);
-      waiter.resolve(approvalResponseFor(approval, approved));
+      waiter.resolve(approval ? approvalResponseFor(approval, approved) : fallbackApprovalResponse(approved));
     }
     if (approval) {
       await this.eventLog.append(approval.runId, {
@@ -336,7 +336,7 @@ function stringifyApprovalDetail(params: unknown): string {
   return (JSON.stringify(params, null, 2) ?? "").slice(0, 4000);
 }
 
-function approvalResponseFor(approval: ApprovalRequest, approved: boolean): unknown {
+export function approvalResponseFor(approval: ApprovalRequest, approved: boolean): unknown {
   const request = approval.payload as Partial<JsonRpcRequest>;
   const method = typeof request.method === "string" ? request.method : "";
   const params = request.params;
@@ -344,7 +344,7 @@ function approvalResponseFor(approval: ApprovalRequest, approved: boolean): unkn
   if (normalized === "execcommandapproval" || normalized === "applypatchapproval") {
     return { decision: approved ? "approved" : "denied" };
   }
-  if (normalized.includes("permissions")) {
+  if (normalized.includes("permission")) {
     const requested = params as { permissions?: { network?: unknown; fileSystem?: unknown } };
     return approved
       ? {
@@ -360,5 +360,9 @@ function approvalResponseFor(approval: ApprovalRequest, approved: boolean): unkn
   if (approval.kind === "tool") {
     return { answers: {} };
   }
+  return { decision: approved ? "accept" : "decline" };
+}
+
+function fallbackApprovalResponse(approved: boolean): unknown {
   return { decision: approved ? "accept" : "decline" };
 }
