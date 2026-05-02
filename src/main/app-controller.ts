@@ -3,6 +3,8 @@ import type { HealthCheckResult, LinearConfig, Run, Task } from "../shared/types
 import { JsonlEventLog } from "./services/event-log.js";
 import { LinearClient } from "./services/linear-client.js";
 import { LinearConfigService } from "./services/linear-config-service.js";
+import { OrchestratorService } from "./services/orchestrator-service.js";
+import { OrchestratorStateStore } from "./services/orchestrator-state.js";
 import { ProfileService } from "./services/profiles.js";
 import { RunService } from "./services/run-service.js";
 import { TaskService } from "./services/task-service.js";
@@ -16,6 +18,8 @@ export class AppController {
   readonly linearConfig: LinearConfigService;
   readonly linear: LinearClient;
   readonly eventLog: JsonlEventLog;
+  readonly orchestratorState: OrchestratorStateStore;
+  readonly orchestrator: OrchestratorService;
 
   constructor(readonly appDataRoot: string) {
     this.profiles = new ProfileService({ appDataRoot });
@@ -24,6 +28,21 @@ export class AppController {
     this.linear = new LinearClient();
     this.eventLog = new JsonlEventLog(path.join(appDataRoot, "logs"));
     this.runs = new RunService(appDataRoot, this.eventLog, new WorkspaceManager({ workflowPath: path.join(process.cwd(), "WORKFLOW.md") }));
+    this.orchestratorState = new OrchestratorStateStore(appDataRoot);
+    this.orchestrator = new OrchestratorService({
+      readState: () => this.orchestratorState.read(),
+      writeState: (state) => this.orchestratorState.write(state),
+      listCandidateTasks: () => this.syncLinear(),
+      listRuns: () => this.runs.list(),
+      startRun: async (task) => {
+        const [profile] = await this.profiles.list();
+        if (!profile) {
+          throw new Error("No Codex profile configured.");
+        }
+        return this.runs.start(task, profile);
+      },
+      appendEvent: (runId, event) => this.eventLog.append(runId, event)
+    });
   }
 
   async saveLinearConfig(config: LinearConfig): Promise<LinearConfig> {

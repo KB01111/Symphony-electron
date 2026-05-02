@@ -1,6 +1,6 @@
 import { ipcMain } from "electron";
 import type { AppController } from "./app-controller.js";
-import type { LinearConfig, Task } from "../shared/types.js";
+import type { AutomationPolicy, LinearConfig, Task } from "../shared/types.js";
 
 export function registerIpc(controller: AppController): void {
   ipcMain.handle("profiles:list", () => controller.profiles.list());
@@ -22,6 +22,13 @@ export function registerIpc(controller: AppController): void {
   ipcMain.handle("runs:retry", (_event, runId: string) => controller.retryRun(runId));
   ipcMain.handle("runs:getEvents", (_event, runId: string) => controller.eventLog.replay(runId));
   ipcMain.handle("runs:respondToApproval", async () => undefined);
+
+  ipcMain.handle("orchestrator:snapshot", () => controller.orchestrator.snapshot());
+  ipcMain.handle("orchestrator:start", () => controller.orchestrator.start());
+  ipcMain.handle("orchestrator:pause", () => controller.orchestrator.pause());
+  ipcMain.handle("orchestrator:resume", () => controller.orchestrator.resume());
+  ipcMain.handle("orchestrator:tick", () => controller.orchestrator.tick());
+  ipcMain.handle("orchestrator:updatePolicy", (_event, policy: Partial<AutomationPolicy>) => controller.orchestrator.updatePolicy(policy));
 
   ipcMain.handle("logs:tail", (_event, runId: string) => controller.eventLog.replay(runId));
   ipcMain.handle("logs:export", (_event, runId: string) => controller.eventLog.exportPath(runId));
