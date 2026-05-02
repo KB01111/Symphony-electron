@@ -151,7 +151,7 @@ export class RunService {
         onNotification: (method, params) => {
           const handled = this.enqueueNotification(run.id, () => this.handleCodexNotification(run.id, method, params));
           if (method === "turn/completed") {
-            void handled.then(() => this.handleTurnCompleted(run.id));
+            void handled.then(() => this.handleTurnCompleted(run.id)).catch(() => {});
           }
         },
         onServerRequest: (request) => this.handleServerRequest(run.id, request),
