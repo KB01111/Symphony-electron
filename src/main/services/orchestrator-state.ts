@@ -18,7 +18,7 @@ export function defaultOrchestratorState(): OrchestratorState {
   return {
     mode: "autonomous",
     paused: false,
-    policy: defaultAutomationPolicy,
+    policy: { ...defaultAutomationPolicy },
     activeClaims: [],
     retryQueue: []
   };

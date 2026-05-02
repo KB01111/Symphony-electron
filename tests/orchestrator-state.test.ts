@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -46,4 +46,39 @@ test("updates state atomically and preserves retry entries", async () => {
 
   expect(updated.paused).toBe(true);
   expect((await store.read()).retryQueue[0]).toMatchObject({ attempts: 2, lastError: "temporary failure" });
+});
+
+test("backfills defaults when reading older partial orchestrator state", async () => {
+  const root = await tempRoot();
+  const stateDir = path.join(root, "state");
+  await mkdir(stateDir, { recursive: true });
+  await writeFile(
+    path.join(stateDir, "orchestrator.json"),
+    JSON.stringify({
+      mode: "manual",
+      paused: true,
+      policy: {
+        autoStart: false,
+        requireApprovalFor: ["command"]
+      }
+    }),
+    "utf8"
+  );
+
+  const store = new OrchestratorStateStore(root);
+  const state = await store.read();
+
+  expect(state.mode).toBe("manual");
+  expect(state.paused).toBe(true);
+  expect(state.policy.autoStart).toBe(false);
+  expect(state.policy.autoCreateHandoff).toBe(true);
+  expect(state.policy.autoWriteTrackerUpdates).toBe(false);
+  expect(state.policy.maxConcurrentRuns).toBe(2);
+  expect(state.policy.pollIntervalSeconds).toBe(60);
+  expect(state.policy.stallTimeoutSeconds).toBe(1800);
+  expect(state.policy.maxRetryBackoffSeconds).toBe(300);
+  expect(state.policy.terminalStateNames).toEqual(["Done", "Canceled", "Cancelled", "Duplicate"]);
+  expect(state.policy.requireApprovalFor).toEqual(["command"]);
+  expect(state.activeClaims).toEqual([]);
+  expect(state.retryQueue).toEqual([]);
 });

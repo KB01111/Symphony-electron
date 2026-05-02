@@ -78,6 +78,8 @@ export interface RunEvent {
 
 export type OrchestratorMode = "manual" | "autonomous";
 
+export type ApprovalKind = "command" | "patch" | "tool" | "network" | "filesystem" | "handoff" | "merge" | "unknown";
+
 export interface AutomationPolicy {
   autoStart: boolean;
   autoCreateHandoff: boolean;
@@ -87,7 +89,7 @@ export interface AutomationPolicy {
   stallTimeoutSeconds: number;
   maxRetryBackoffSeconds: number;
   terminalStateNames: string[];
-  requireApprovalFor: Array<"command" | "patch" | "network" | "filesystem" | "handoff" | "merge">;
+  requireApprovalFor: Array<Exclude<ApprovalKind, "tool" | "unknown">>;
 }
 
 export interface RetryQueueEntry {
@@ -124,7 +126,7 @@ export interface OrchestratorSnapshot {
 export interface ApprovalRequest {
   id: string;
   runId: string;
-  kind: "command" | "patch" | "tool" | "unknown";
+  kind: ApprovalKind;
   title: string;
   detail: string;
   payload: unknown;
