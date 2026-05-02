@@ -466,6 +466,17 @@ function stringifyApprovalDetail(params: unknown): string {
   return (JSON.stringify(params, null, 2) ?? "").slice(0, 4000);
 }
 
+/**
+ * Builds the protocol-shaped response for an approval request based on its kind and the operator decision.
+ *
+ * @param approval - The approval request containing the original protocol payload and metadata
+ * @param approved - Whether the approval was granted by the operator
+ * @returns One of:
+ * - `{ decision: "approved" | "denied" }` for `execcommandapproval` or `applypatchapproval`
+ * - Permission response when the method includes `permission`: if `approved`, an object with selected `permissions`, `scope: "turn"`, and `strictAutoReview: true`; if not, `{ permissions: {}, scope: "turn", strictAutoReview: true }`
+ * - `{ answers: {} }` for approvals of kind `"tool"`
+ * - `{ decision: "accept" | "decline" }` for all other approval types
+ */
 export function approvalResponseFor(approval: ApprovalRequest, approved: boolean): unknown {
   const request = approval.payload as Partial<JsonRpcRequest>;
   const method = typeof request.method === "string" ? request.method : "";
@@ -504,10 +515,9 @@ function fallbackApprovalResponse(approved: boolean): unknown {
 }
 
 /**
- * Infers a proof kind from a Codex notification or protocol method name.
+ * Determine the ProofKind suggested by a Codex notification or protocol method name.
  *
- * @param method - The notification or method string to inspect
- * @returns The matching `ProofKind` (`"test"`, `"ci"`, `"review"`, `"diff"`, or `"pr"`) if the method indicates one; otherwise `undefined`
+ * @returns The matching `ProofKind` (`"test"`, `"ci"`, `"review"`, `"diff"`, or `"pr"`) when the method indicates one; otherwise `undefined`.
  */
 function inferProofKind(method: string): ProofKind | undefined {
   const normalized = method.toLowerCase();
