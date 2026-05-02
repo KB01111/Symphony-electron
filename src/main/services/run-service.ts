@@ -304,15 +304,17 @@ export class RunService {
   }
 
   private async cleanupApprovalWaitersForRun(runId: string): Promise<void> {
+    const approvals = this.options.approvals;
+    const pending = approvals ? (await approvals.listForRun(runId)).filter((approval) => approval.status === "pending") : [];
+    const pendingById = new Map(pending.map((approval) => [approval.id, approval]));
     for (const [approvalId, waiter] of this.approvalWaiters) {
       if (waiter.runId === runId) {
         this.approvalWaiters.delete(approvalId);
-        waiter.resolve(fallbackApprovalResponse(false));
+        const approval = pendingById.get(approvalId);
+        waiter.resolve(approval ? approvalResponseFor(approval, false) : fallbackApprovalResponse(false));
       }
     }
-    const approvals = this.options.approvals;
     if (!approvals) return;
-    const pending = (await approvals.listForRun(runId)).filter((approval) => approval.status === "pending");
     await Promise.all(
       pending.map(async (approval) => {
         try {

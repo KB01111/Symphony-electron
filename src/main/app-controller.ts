@@ -67,7 +67,7 @@ export class AppController {
     this.orchestrator = new OrchestratorService({
       readState: () => this.orchestratorState.read(),
       writeState: (state) => this.orchestratorState.write(state),
-      listCandidateTasks: () => this.syncLinear(),
+      listCandidateTasks: () => this.refreshLinearCandidates(),
       listRuns: () => this.runs.list(),
       startRun: async (task) => {
         const profile = await this.selectHealthyProfile();
@@ -112,6 +112,12 @@ export class AppController {
   async syncLinear(): Promise<Task[]> {
     const issues = await this.listLinearIssues();
     return this.tasks.upsertMany(issues);
+  }
+
+  private async refreshLinearCandidates(): Promise<Task[]> {
+    const issues = await this.listLinearIssues();
+    await this.tasks.upsertMany(issues);
+    return issues;
   }
 
   async transitionLinearIssue(issueId: string, stateName: string): Promise<void> {

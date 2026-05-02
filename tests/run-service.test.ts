@@ -109,8 +109,8 @@ test("cancelled runs resolve pending approval waiters and deny persisted approva
         requestApproval = async (requestId: string) =>
           options.onServerRequest?.({
             id: requestId,
-            method: "item/commandExecution/requestApproval",
-            params: { command: "npm test" }
+            method: "item/permissions/requestApproval",
+            params: { permissions: { network: true } }
           });
         return { threadId: "thread-1", turnId: "turn-1" };
       },
@@ -125,7 +125,7 @@ test("cancelled runs resolve pending approval waiters and deny persisted approva
 
   await service.cancel(run.id);
 
-  await expect(pendingResponse).resolves.toEqual({ decision: "decline" });
+  await expect(pendingResponse).resolves.toEqual({ permissions: {}, scope: "turn", strictAutoReview: true });
   expect(await approvals.listPending()).toEqual([]);
   expect(await approvals.listForRun(run.id)).toMatchObject([{ status: "denied" }]);
 });
