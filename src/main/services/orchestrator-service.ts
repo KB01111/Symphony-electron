@@ -16,25 +16,30 @@ const ACTIVE_RUN_STATES = new Set<Run["state"]>(["preparing", "running"]);
 export class OrchestratorService {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly now: () => Date;
+  private mutationQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly dependencies: OrchestratorDependencies) {
     this.now = dependencies.now ?? (() => new Date());
   }
 
   async start(): Promise<OrchestratorState> {
-    const current = await this.dependencies.readState();
-    const next: OrchestratorState = { ...current, mode: "autonomous", paused: false };
-    await this.dependencies.writeState(next);
-    this.schedule(next.policy.pollIntervalSeconds);
-    return next;
+    return this.enqueueMutation(async () => {
+      const current = await this.dependencies.readState();
+      const next: OrchestratorState = { ...current, mode: "autonomous", paused: false };
+      await this.dependencies.writeState(next);
+      this.schedule(next.policy.pollIntervalSeconds);
+      return next;
+    });
   }
 
   async pause(): Promise<OrchestratorState> {
     this.clearTimer();
-    const current = await this.dependencies.readState();
-    const next: OrchestratorState = { ...current, paused: true };
-    await this.dependencies.writeState(next);
-    return next;
+    return this.enqueueMutation(async () => {
+      const current = await this.dependencies.readState();
+      const next: OrchestratorState = { ...current, paused: true };
+      await this.dependencies.writeState(next);
+      return next;
+    });
   }
 
   resume(): Promise<OrchestratorState> {
@@ -42,10 +47,12 @@ export class OrchestratorService {
   }
 
   async updatePolicy(policy: Partial<AutomationPolicy>): Promise<OrchestratorState> {
-    const current = await this.dependencies.readState();
-    const next: OrchestratorState = { ...current, policy: { ...current.policy, ...policy } };
-    await this.dependencies.writeState(next);
-    return next;
+    return this.enqueueMutation(async () => {
+      const current = await this.dependencies.readState();
+      const next: OrchestratorState = { ...current, policy: { ...current.policy, ...policy } };
+      await this.dependencies.writeState(next);
+      return next;
+    });
   }
 
   async snapshot(): Promise<OrchestratorSnapshot> {
@@ -58,6 +65,14 @@ export class OrchestratorService {
   }
 
   async tick(): Promise<OrchestratorSnapshot> {
+    return this.enqueueMutation(() => this.runTick());
+  }
+
+  stop(): void {
+    this.clearTimer();
+  }
+
+  private async runTick(): Promise<OrchestratorSnapshot> {
     const [state, candidates, runs] = await Promise.all([
       this.dependencies.readState(),
       this.dependencies.listCandidateTasks(),
@@ -66,17 +81,21 @@ export class OrchestratorService {
     const now = this.now();
     const nowIso = now.toISOString();
     const activeRuns = runs.filter((run) => ACTIVE_RUN_STATES.has(run.state));
+    const runsById = new Map(runs.map((run) => [run.id, run]));
     const activeTaskIds = new Set(activeRuns.map((run) => run.taskId));
     const activeRunIds = new Set(activeRuns.map((run) => run.id));
-    const activeClaims = state.activeClaims.filter((claim) => activeTaskIds.has(claim.taskId) && activeRunIds.has(claim.runId));
+    const activeClaims = state.activeClaims.filter((claim) => {
+      const run = runsById.get(claim.runId);
+      return run ? ACTIVE_RUN_STATES.has(run.state) : true;
+    });
     const claimedTaskIds = new Set(activeClaims.map((claim) => claim.taskId));
-    let activeCount = activeTaskIds.size;
+    let activeCount = new Set([...activeTaskIds, ...claimedTaskIds]).size;
     const queuedTaskIds: string[] = [];
-    const retryQueue = [...state.retryQueue];
+    const retryQueueByTaskId = new Map(state.retryQueue.map((entry) => [entry.taskId, entry]));
     const next: OrchestratorState = {
       ...state,
       activeClaims,
-      retryQueue,
+      retryQueue: [...retryQueueByTaskId.values()],
       lastTickAt: nowIso
     };
 
@@ -86,6 +105,12 @@ export class OrchestratorService {
       }
 
       if (next.paused || !next.policy.autoStart) {
+        queuedTaskIds.push(candidate.id);
+        continue;
+      }
+
+      const retry = retryQueueByTaskId.get(candidate.id);
+      if (retry && new Date(retry.nextAttemptAt).getTime() > now.getTime()) {
         queuedTaskIds.push(candidate.id);
         continue;
       }
@@ -107,17 +132,22 @@ export class OrchestratorService {
         activeTaskIds.add(candidate.id);
         activeRunIds.add(run.id);
         activeCount += 1;
+        retryQueueByTaskId.delete(candidate.id);
+        next.retryQueue = [...retryQueueByTaskId.values()];
         await this.dependencies.appendEvent(run.id, {
           type: "orchestrator.claimed",
           message: `Autonomous orchestrator claimed ${candidate.identifier}.`
         });
       } catch (error) {
-        retryQueue.push({
+        const attempts = (retryQueueByTaskId.get(candidate.id)?.attempts ?? 0) + 1;
+        const backoffSeconds = Math.min(10 * 2 ** (attempts - 1), next.policy.maxRetryBackoffSeconds);
+        retryQueueByTaskId.set(candidate.id, {
           taskId: candidate.id,
-          attempts: 1,
-          nextAttemptAt: new Date(now.getTime() + 10_000).toISOString(),
+          attempts,
+          nextAttemptAt: new Date(now.getTime() + backoffSeconds * 1000).toISOString(),
           lastError: (error as Error).message
         });
+        next.retryQueue = [...retryQueueByTaskId.values()];
       }
     }
 
@@ -127,10 +157,6 @@ export class OrchestratorService {
       queuedTaskIds,
       activeRuns: next.activeClaims.map((claim) => ({ id: claim.runId, taskId: claim.taskId }))
     };
-  }
-
-  stop(): void {
-    this.clearTimer();
   }
 
   private schedule(intervalSeconds: number): void {
@@ -144,8 +170,11 @@ export class OrchestratorService {
           }
         })
         .catch(async (error) => {
-          const current = await this.dependencies.readState();
-          await this.dependencies.writeState({ ...current, lastError: (error as Error).message });
+          const current = await this.enqueueMutation(async () => {
+            const currentState = await this.dependencies.readState();
+            await this.dependencies.writeState({ ...currentState, lastError: (error as Error).message });
+            return currentState;
+          });
           if (!current.paused && current.policy.autoStart) {
             this.schedule(current.policy.pollIntervalSeconds);
           }
@@ -158,5 +187,14 @@ export class OrchestratorService {
       clearTimeout(this.timer);
       this.timer = undefined;
     }
+  }
+
+  private enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.mutationQueue.then(operation, operation);
+    this.mutationQueue = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
   }
 }
