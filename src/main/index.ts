@@ -42,6 +42,7 @@ app.whenReady().then(() => {
   const controller = new AppController(app.getPath("userData"));
   registerIpc(controller);
   createWindow();
+  void controller.startScheduler();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

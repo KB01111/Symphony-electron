@@ -1,10 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { InitializeParams } from "../../generated/codex-app-server/InitializeParams.js";
-import type { JsonRpcId } from "./codex-jsonrpc.js";
 import type { ThreadStartParams } from "../../generated/codex-app-server/v2/ThreadStartParams.js";
 import type { ThreadStartResponse } from "../../generated/codex-app-server/v2/ThreadStartResponse.js";
 import type { TurnStartParams } from "../../generated/codex-app-server/v2/TurnStartParams.js";
-import { CodexJsonRpcClient } from "./codex-jsonrpc.js";
+import type { TurnStartResponse } from "../../generated/codex-app-server/v2/TurnStartResponse.js";
+import type { DynamicToolSpec } from "../../generated/codex-app-server/v2/DynamicToolSpec.js";
+import { CodexJsonRpcClient, type JsonRpcRequest } from "./codex-jsonrpc.js";
 
 export interface CodexAppServerOptions {
   codexHome: string;
@@ -12,16 +13,24 @@ export interface CodexAppServerOptions {
   onStdout?(chunk: string): void;
   onStderr?(chunk: string): void;
   onNotification?(method: string, params: unknown): void;
-  onRequest?(method: string, params: unknown, id: JsonRpcId): void;
+  onServerRequest?(request: JsonRpcRequest): Promise<unknown> | unknown;
   onProtocolError?(error: Error, chunk: string): void;
   onExit?(exitCode: number | null, signal: NodeJS.Signals | null): void;
+  dynamicTools?: DynamicToolSpec[];
+}
+
+export interface StartedTurn {
+  threadId: string;
+  turnId: string;
 }
 
 export class CodexAppServerProcess {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly client: CodexJsonRpcClient;
+  private readonly dynamicTools: DynamicToolSpec[];
 
   constructor(options: CodexAppServerOptions) {
+    this.dynamicTools = options.dynamicTools ?? defaultDynamicTools();
     this.child = spawn("codex", ["app-server", "--listen", "stdio://"], {
       cwd: options.cwd,
       env: { ...process.env, CODEX_HOME: options.codexHome },
@@ -33,7 +42,12 @@ export class CodexAppServerProcess {
       close: () => this.child.kill()
     });
     this.client.onNotification((notification) => options.onNotification?.(notification.method, notification.params));
-    this.client.onRequest((request) => options.onRequest?.(request.method, request.params, request.id));
+    this.client.onRequest(async (request) => {
+      if (!options.onServerRequest) {
+        throw new Error(`No Symphony handler for app-server request ${request.method}`);
+      }
+      return options.onServerRequest(request);
+    });
     this.child.stdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       options.onStdout?.(text);
@@ -51,7 +65,7 @@ export class CodexAppServerProcess {
     return this.child.pid;
   }
 
-  async startTurn(prompt: string, cwd: string): Promise<void> {
+  async startTurn(prompt: string, cwd: string): Promise<StartedTurn> {
     const initializeParams: InitializeParams = {
       clientInfo: {
         name: "symphony-electron",
@@ -72,6 +86,8 @@ export class CodexAppServerProcess {
       approvalsReviewer: "auto_review",
       sandbox: "workspace-write",
       baseInstructions: "You are running inside Symphony Electron. Work only in the provided workspace and emit concise status updates.",
+      serviceName: "symphony-electron",
+      dynamicTools: this.dynamicTools,
       experimentalRawEvents: false,
       persistExtendedHistory: true
     };
@@ -81,19 +97,30 @@ export class CodexAppServerProcess {
       cwd,
       input: [{ type: "text", text: prompt, text_elements: [] }]
     };
-    await this.client.request("turn/start", turnParams);
+    const turn = await this.client.request<TurnStartResponse>("turn/start", turnParams);
+    return { threadId: thread.thread.id, turnId: turn.turn.id };
   }
 
   close(): void {
     this.client.close();
   }
-
-  respondToRequest(id: JsonRpcId, result: unknown): void {
-    this.client.respond(id, result);
-  }
-
-  rejectRequest(id: JsonRpcId, code: number, message: string, data?: unknown): void {
-    this.client.respondError(id, code, message, data);
-  }
 }
 
+function defaultDynamicTools(): DynamicToolSpec[] {
+  return [
+    {
+      namespace: "linear",
+      name: "linear_graphql",
+      description: "Run a scoped Linear GraphQL operation for the current issue workflow.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          variables: { type: "object" }
+        },
+        required: ["query"],
+        additionalProperties: false
+      }
+    }
+  ];
+}
