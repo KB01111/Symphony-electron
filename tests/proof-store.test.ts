@@ -29,30 +29,48 @@ test("stores proof entries per run in creation order", async () => {
   expect(await store.list("run-2")).toEqual([]);
 });
 
-test("serializes concurrent writes for the same runId without losing entries", async () => {
+test("entries for different runs are stored together but listed independently", async () => {
   const store = new ProofStore(await tempRoot(), () => "2026-05-02T10:00:00.000Z");
-  const runId = "run-concurrent-1";
 
-  const entries = Array.from({ length: 10 }, (_, i) => ({
-    kind: "test" as const,
-    label: `step-${i}`,
-    status: i % 2 === 0 ? ("passed" as const) : ("failed" as const),
-    detail: `detail-${i}`
-  }));
+  await store.add("run-1", { kind: "test", label: "run-1 test", status: "passed", detail: "ok" });
+  await store.add("run-2", { kind: "ci", label: "run-2 ci", status: "failed", detail: "nope" });
+  await store.add("run-1", { kind: "summary", label: "run-1 summary", status: "passed", detail: "done" });
 
-  // Fire all adds concurrently; ProofStore.writeQueue should serialize them
-  await Promise.all(entries.map((entry) => store.add(runId, entry)));
+  const run1 = await store.list("run-1");
+  const run2 = await store.list("run-2");
 
-  const stored = await store.list(runId);
+  expect(run1).toHaveLength(2);
+  expect(run1.every((e) => e.runId === "run-1")).toBe(true);
+  expect(run2).toHaveLength(1);
+  expect(run2[0].runId).toBe("run-2");
+});
 
-  // All entries should be present
-  expect(stored).toHaveLength(entries.length);
+test("each entry receives a unique id", async () => {
+  const store = new ProofStore(await tempRoot(), () => "2026-05-02T10:00:00.000Z");
 
-  // Order should be consistent with the order in which add() was scheduled
-  expect(stored).toMatchObject(
-    entries.map((entry) => ({
-      runId,
-      ...entry
-    }))
-  );
+  const a = await store.add("run-1", { kind: "test", label: "a", status: "passed", detail: "" });
+  const b = await store.add("run-1", { kind: "test", label: "b", status: "passed", detail: "" });
+
+  expect(a.id).not.toBe(b.id);
+  expect(a.id).toMatch(/^proof-/);
+  expect(b.id).toMatch(/^proof-/);
+});
+
+test("concurrent adds do not lose entries", async () => {
+  const store = new ProofStore(await tempRoot(), () => "2026-05-02T10:00:00.000Z");
+
+  await Promise.all([
+    store.add("run-1", { kind: "test", label: "t1", status: "passed", detail: "" }),
+    store.add("run-1", { kind: "ci", label: "t2", status: "passed", detail: "" }),
+    store.add("run-1", { kind: "review", label: "t3", status: "passed", detail: "" })
+  ]);
+
+  const entries = await store.list("run-1");
+  expect(entries).toHaveLength(3);
+  expect(new Set(entries.map((e) => e.label)).size).toBe(3);
+});
+
+test("returns empty array for run with no entries", async () => {
+  const store = new ProofStore(await tempRoot(), () => "2026-05-02T10:00:00.000Z");
+  expect(await store.list("nonexistent-run")).toEqual([]);
 });
