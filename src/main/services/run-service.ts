@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
-import type { ApprovalRequest, Profile, Run, RunTranscriptItem, Task } from "../../shared/types.js";
+import type { ApprovalRequest, Profile, ProofInput, ProofKind, ProofStatus, Run, RunTranscriptItem, Task } from "../../shared/types.js";
 import { eventToTranscriptItem } from "../../shared/transcript.js";
 import { FileStateStore } from "./file-state.js";
 import { JsonlEventLog } from "./event-log.js";
@@ -10,12 +10,14 @@ import { isoNow } from "./time.js";
 import { WorkspaceManager } from "./workspace-manager.js";
 import { CodexAppServerProcess, type CodexAppServerProcessFactory, type CodexAppServerProcessLike } from "./codex-app-server.js";
 import { ApprovalService } from "./approval-service.js";
+import { ProofStore } from "./proof-store.js";
 import type { JsonRpcRequest } from "./codex-jsonrpc.js";
 
 const execFileAsync = promisify(execFile);
 
 interface RunServiceOptions {
   approvals?: ApprovalService;
+  proof?: ProofStore;
   onRunNeedsReview?(run: Run): Promise<void>;
   onLinearGraphql?(payload: { query: string; variables?: Record<string, unknown> }): Promise<unknown>;
   createCodexProcess?: CodexAppServerProcessFactory;
@@ -25,6 +27,7 @@ export class RunService {
   private readonly store: FileStateStore<Run[]>;
   private readonly active = new Map<string, CodexAppServerProcessLike>();
   private readonly approvalWaiters = new Map<string, { runId: string; resolve(response: unknown): void }>();
+  private readonly notificationQueues = new Map<string, Promise<void>>();
 
   constructor(
     appDataRoot: string,
@@ -68,6 +71,9 @@ export class RunService {
     }
     this.active.delete(runId);
     await this.cleanupApprovalWaitersForRun(runId);
+    if (run.workspacePath) {
+      await this.safeWorkspaceBeforeRemove(run.workspacePath);
+    }
     const cancelled = await this.patch(runId, { state: "cancelled", completedAt: isoNow() });
     await this.eventLog.append(runId, { type: "run.cancelled", message: "Run cancelled by operator." });
     return cancelled;
@@ -136,12 +142,16 @@ export class RunService {
       const process = createCodexProcess({
         codexHome: profile.codexHome,
         cwd: workspace.path,
+        command: workspace.runtime.command,
+        approvalPolicy: workspace.runtime.approvalPolicy,
+        sandbox: workspace.runtime.threadSandbox,
+        readTimeoutMs: workspace.runtime.readTimeoutMs,
         onStdout: (chunk) => void this.eventLog.append(run.id, { type: "codex.stdout", stream: "stdout", message: chunk }),
         onStderr: (chunk) => void this.eventLog.append(run.id, { type: "codex.stderr", stream: "stderr", message: chunk }),
         onNotification: (method, params) => {
-          void this.eventLog.append(run.id, { type: `codex.${method}`, payload: params });
+          const handled = this.enqueueNotification(run.id, () => this.handleCodexNotification(run.id, method, params));
           if (method === "turn/completed") {
-            void this.handleTurnCompleted(run.id);
+            void handled.then(() => this.handleTurnCompleted(run.id));
           }
         },
         onServerRequest: (request) => this.handleServerRequest(run.id, request),
@@ -171,6 +181,10 @@ export class RunService {
     } catch (error) {
       this.active.delete(run.id);
       await this.cleanupApprovalWaitersForRun(run.id);
+      const failed = await this.get(run.id).catch(() => run);
+      if (failed.workspacePath) {
+        await this.safeWorkspaceAfterRun(failed.workspacePath);
+      }
       await this.patch(run.id, {
         state: "failed",
         completedAt: isoNow(),
@@ -185,6 +199,9 @@ export class RunService {
     const run = await this.get(runId);
     if (run.state === "cancelled" || run.state === "done" || run.state === "failed" || run.state === "review") return;
     await this.cleanupApprovalWaitersForRun(runId);
+    if (run.workspacePath) {
+      await this.safeWorkspaceAfterRun(run.workspacePath);
+    }
     const failed = exitCode !== 0;
     await this.patch(runId, {
       state: failed ? "failed" : "review",
@@ -205,11 +222,20 @@ export class RunService {
   private async handleTurnCompleted(runId: string): Promise<void> {
     const run = await this.get(runId);
     if (run.state === "cancelled" || run.state === "done" || run.state === "failed" || run.state === "review") return;
+    await this.addProof(runId, {
+      kind: "summary",
+      label: "Codex turn completed",
+      status: "passed",
+      detail: "The Codex app-server turn completed and the run is ready for Human Review."
+    });
     const reviewed = await this.patch(runId, {
       state: "review",
       completedAt: isoNow(),
       updatedAt: isoNow()
     });
+    if (reviewed.workspacePath) {
+      await this.safeWorkspaceAfterRun(reviewed.workspacePath);
+    }
     await this.eventLog.append(runId, { type: "run.review", message: "Codex turn completed; run is ready for review." });
     await this.options.onRunNeedsReview?.(reviewed);
     const process = this.active.get(runId);
@@ -300,6 +326,71 @@ export class RunService {
       await this.eventLog.append(runId, input);
     } catch {
       // Protocol error capture must not break the running session.
+    }
+  }
+
+  private async handleCodexNotification(runId: string, method: string, params: unknown): Promise<void> {
+    await this.eventLog.append(runId, { type: `codex.${method}`, payload: params });
+    const lowerMethod = method.toLowerCase();
+    if (lowerMethod.includes("tokenusage")) {
+      await this.addProof(runId, {
+        kind: "token_usage",
+        label: "Token usage",
+        status: "unknown",
+        detail: stringifyProofDetail(params)
+      });
+      return;
+    }
+    if (lowerMethod.includes("ratelimit")) {
+      await this.addProof(runId, {
+        kind: "rate_limit",
+        label: "Rate limit",
+        status: "warning",
+        detail: stringifyProofDetail(params)
+      });
+      return;
+    }
+    const kind = inferProofKind(method);
+    if (!kind) return;
+    await this.addProof(runId, {
+      kind,
+      label: method,
+      status: inferProofStatus(params),
+      detail: stringifyProofDetail(params)
+    });
+  }
+
+  private enqueueNotification(runId: string, operation: () => Promise<void>): Promise<void> {
+    const current = this.notificationQueues.get(runId) ?? Promise.resolve();
+    const next = current.then(operation, operation);
+    this.notificationQueues.set(
+      runId,
+      next.finally(() => {
+        if (this.notificationQueues.get(runId) === next) {
+          this.notificationQueues.delete(runId);
+        }
+      })
+    );
+    return next;
+  }
+
+  private async addProof(runId: string, input: ProofInput): Promise<void> {
+    await this.options.proof?.add(runId, input);
+  }
+
+  private async safeWorkspaceAfterRun(workspacePath: string): Promise<void> {
+    try {
+      await this.workspaceManager.afterRun(workspacePath);
+    } catch {
+      // Hook failures after a run should not mask the original run result.
+    }
+  }
+
+  private async safeWorkspaceBeforeRemove(workspacePath: string): Promise<void> {
+    try {
+      await this.workspaceManager.beforeRemove(workspacePath);
+    } catch {
+      // Cleanup hooks must not block explicit cancellation.
     }
   }
 
@@ -403,4 +494,26 @@ export function approvalResponseFor(approval: ApprovalRequest, approved: boolean
 
 function fallbackApprovalResponse(approved: boolean): unknown {
   return { decision: approved ? "accept" : "decline" };
+}
+
+function inferProofKind(method: string): ProofKind | undefined {
+  const normalized = method.toLowerCase();
+  if (normalized.includes("test")) return "test";
+  if (normalized.includes("ci")) return "ci";
+  if (normalized.includes("review")) return "review";
+  if (normalized.includes("diff")) return "diff";
+  if (normalized.includes("pullrequest") || normalized.includes("pr")) return "pr";
+  return undefined;
+}
+
+function inferProofStatus(value: unknown): ProofStatus {
+  const text = stringifyProofDetail(value).toLowerCase();
+  if (text.includes("failed") || text.includes("failure") || text.includes("error")) return "failed";
+  if (text.includes("passed") || text.includes("success") || text.includes("completed")) return "passed";
+  if (text.includes("warning") || text.includes("warn")) return "warning";
+  return "unknown";
+}
+
+function stringifyProofDetail(value: unknown): string {
+  return (JSON.stringify(value, null, 2) ?? "").slice(0, 2000);
 }

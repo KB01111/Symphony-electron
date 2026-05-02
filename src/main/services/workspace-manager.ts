@@ -1,13 +1,14 @@
-import { execFile } from "node:child_process";
+import { exec, execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { Profile, Task, WorkspaceRef } from "../../shared/types.js";
-import { WorkflowService } from "./workflow-service.js";
+import type { CodexRuntimeConfig, Profile, Task, WorkspaceRef } from "../../shared/types.js";
+import { WorkflowService, type LoadedWorkflow } from "./workflow-service.js";
 
 const execFileAsync = promisify(execFile);
+const execAsync = promisify(exec);
 
 export class WorkspaceManager {
   private readonly workflow: WorkflowService | undefined;
@@ -17,6 +18,7 @@ export class WorkspaceManager {
   }
 
   async prepareWorkspace(profile: Profile, task: Task): Promise<WorkspaceRef> {
+    const loadedWorkflow = await this.loadWorkflow();
     await mkdir(profile.workspaceRoot, { recursive: true });
     await mkdir(profile.repoCacheRoot, { recursive: true });
     const workspacePath = safeChildPath(profile.workspaceRoot, `${slugify(task.identifier)}-${slugify(task.externalId)}`);
@@ -31,7 +33,10 @@ export class WorkspaceManager {
       await mkdir(workspacePath, { recursive: true });
     }
 
-    const workflowPrompt = await this.renderWorkflowPrompt(task);
+    await this.runHook(loadedWorkflow, "afterCreate", workspacePath);
+    await this.runHook(loadedWorkflow, "beforeRun", workspacePath);
+
+    const workflowPrompt = await this.renderWorkflowPrompt(task, loadedWorkflow);
     const promptPath = path.join(workspacePath, "SYMPHONY_TASK.md");
     await writeFile(promptPath, workflowPrompt, "utf8");
 
@@ -39,8 +44,17 @@ export class WorkspaceManager {
       path: workspacePath,
       promptPath,
       workflowPrompt,
+      runtime: this.runtimeConfig(loadedWorkflow),
       ...(repoCachePath ? { repoCachePath } : {})
     };
+  }
+
+  async afterRun(workspacePath: string): Promise<void> {
+    await this.runHook(await this.loadWorkflow(), "afterRun", workspacePath);
+  }
+
+  async beforeRemove(workspacePath: string): Promise<void> {
+    await this.runHook(await this.loadWorkflow(), "beforeRemove", workspacePath);
   }
 
   private async ensureRepositoryCache(profile: Profile, repositoryUrl: string): Promise<string> {
@@ -54,8 +68,12 @@ export class WorkspaceManager {
     return cachePath;
   }
 
-  private async renderWorkflowPrompt(task: Task): Promise<string> {
+  private async renderWorkflowPrompt(task: Task, loadedWorkflow?: LoadedWorkflow | null): Promise<string> {
     if (this.workflow) {
+      if (loadedWorkflow) {
+        const template = loadedWorkflow.promptTemplate;
+        return this.workflow.renderPrompt(task);
+      }
       return this.workflow.renderPrompt(task);
     }
     return [
@@ -68,6 +86,43 @@ export class WorkspaceManager {
       "",
       "Work inside this isolated workspace. Preserve unrelated changes. Report verification clearly."
     ].join("\n");
+  }
+
+  private async loadWorkflow(): Promise<LoadedWorkflow | null> {
+    return this.workflow ? this.workflow.load() : null;
+  }
+
+  private runtimeConfig(loadedWorkflow: LoadedWorkflow | null): CodexRuntimeConfig {
+    const codex = loadedWorkflow?.config.codex;
+    return {
+      command: codex?.command ?? "codex app-server",
+      approvalPolicy: codex?.approvalPolicy,
+      threadSandbox: codex?.threadSandbox,
+      turnSandboxPolicy: codex?.turnSandboxPolicy,
+      turnTimeoutMs: codex?.turnTimeoutMs ?? 3_600_000,
+      readTimeoutMs: codex?.readTimeoutMs ?? 5_000,
+      stallTimeoutMs: codex?.stallTimeoutMs ?? 300_000,
+      maxTurns: loadedWorkflow?.config.agent.maxTurns ?? 20
+    };
+  }
+
+  private async runHook(
+    loadedWorkflow: LoadedWorkflow | null,
+    hook: "afterCreate" | "beforeRun" | "afterRun" | "beforeRemove",
+    workspacePath: string
+  ): Promise<void> {
+    const command = loadedWorkflow?.config.hooks[hook];
+    if (!command) return;
+    await execAsync(command, {
+      cwd: workspacePath,
+      timeout: loadedWorkflow.config.hooks.timeoutMs,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        SYMPHONY_WORKSPACE: workspacePath,
+        SYMPHONY_WORKFLOW: loadedWorkflow.path
+      }
+    });
   }
 
   private async loadWorkflowTemplate(): Promise<string> {

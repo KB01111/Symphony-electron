@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import { ApprovalService } from "../src/main/services/approval-service.js";
 import { JsonlEventLog } from "../src/main/services/event-log.js";
+import { ProofStore } from "../src/main/services/proof-store.js";
 import { approvalResponseFor, isApprovalRequestMethod } from "../src/main/services/run-service.js";
 import { RunService } from "../src/main/services/run-service.js";
 import { WorkspaceManager } from "../src/main/services/workspace-manager.js";
@@ -128,4 +129,47 @@ test("cancelled runs resolve pending approval waiters and deny persisted approva
   await expect(pendingResponse).resolves.toEqual({ permissions: {}, scope: "turn", strictAutoReview: true });
   expect(await approvals.listPending()).toEqual([]);
   expect(await approvals.listForRun(run.id)).toMatchObject([{ status: "denied" }]);
+});
+
+test("records proof from Codex notifications and marks completed turns for review", async () => {
+  const root = await tempRoot();
+  await writeFile(path.join(root, "WORKFLOW.md"), "Handle {{identifier}}");
+  const proof = new ProofStore(root, () => "2026-05-02T10:00:00.000Z");
+  const service = new RunService(root, new JsonlEventLog(path.join(root, "logs")), new WorkspaceManager({ workflowPath: path.join(root, "WORKFLOW.md") }), {
+    proof,
+    createCodexProcess: (options) => ({
+      get pid() {
+        return undefined;
+      },
+      startTurn: async () => {
+        options.onNotification?.("thread/tokenUsageUpdated", {
+          tokenUsage: {
+            total: { inputTokens: 10, cachedInputTokens: 0, outputTokens: 20, reasoningOutputTokens: 5, totalTokens: 30 },
+            last: { inputTokens: 10, cachedInputTokens: 0, outputTokens: 20, reasoningOutputTokens: 5, totalTokens: 30 },
+            modelContextWindow: 128000
+          }
+        });
+        options.onNotification?.("turn/completed", { turn: { id: "turn-1" } });
+        return { threadId: "thread-1", turnId: "turn-1" };
+      },
+      close: vi.fn()
+    })
+  });
+
+  const run = await service.start(task(), profile(root));
+  await vi.waitFor(async () => expect((await service.get(run.id)).state).toBe("review"));
+
+  expect(await proof.list(run.id)).toMatchObject([
+    {
+      kind: "token_usage",
+      label: "Token usage",
+      status: "unknown",
+      detail: expect.stringContaining("totalTokens")
+    },
+    {
+      kind: "summary",
+      label: "Codex turn completed",
+      status: "passed"
+    }
+  ]);
 });

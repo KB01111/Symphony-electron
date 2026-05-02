@@ -13,11 +13,12 @@ import type {
 } from "../shared/types.js";
 import { ApprovalService } from "./services/approval-service.js";
 import { JsonlEventLog } from "./services/event-log.js";
+import { HandoffService } from "./services/handoff-service.js";
 import { LinearClient } from "./services/linear-client.js";
 import { LinearConfigService } from "./services/linear-config-service.js";
-import { OrchestrationService } from "./services/orchestration-service.js";
 import { OrchestratorService } from "./services/orchestrator-service.js";
 import { OrchestratorStateStore } from "./services/orchestrator-state.js";
+import { ProofStore } from "./services/proof-store.js";
 import { ProfileService } from "./services/profiles.js";
 import { RunService } from "./services/run-service.js";
 import { TaskService } from "./services/task-service.js";
@@ -33,11 +34,11 @@ export class AppController {
   readonly linear: LinearClient;
   readonly eventLog: JsonlEventLog;
   readonly approvals: ApprovalService;
+  readonly proof: ProofStore;
+  readonly handoff: HandoffService;
   readonly workflow: WorkflowService;
-  readonly scheduler: OrchestrationService;
   readonly orchestratorState: OrchestratorStateStore;
   readonly orchestrator: OrchestratorService;
-  private schedulerDisabled = false;
 
   constructor(readonly appDataRoot: string) {
     this.profiles = new ProfileService({ appDataRoot });
@@ -47,21 +48,16 @@ export class AppController {
     this.workflow = new WorkflowService(path.join(process.cwd(), "WORKFLOW.md"));
     this.eventLog = new JsonlEventLog(path.join(appDataRoot, "logs"));
     this.approvals = new ApprovalService(appDataRoot);
+    this.proof = new ProofStore(appDataRoot);
+    this.handoff = new HandoffService();
     this.runs = new RunService(appDataRoot, this.eventLog, new WorkspaceManager({ workflow: this.workflow }), {
       approvals: this.approvals,
+      proof: this.proof,
       onRunNeedsReview: (run) => this.markRunReadyForReview(run),
       onLinearGraphql: async (payload) => {
         const config = await this.linearConfig.get();
         return this.linear.graphql(config, payload);
       }
-    });
-    this.scheduler = new OrchestrationService({
-      getLinearConfig: () => this.linearConfig.get(),
-      syncLinear: () => this.syncLinear(),
-      listProfiles: () => this.profiles.list(),
-      checkProfileHealth: (profile) => this.profiles.checkHealth(profile.id),
-      listRuns: () => this.runs.list(),
-      startRun: (task, profile) => this.startRun(task.id, profile.id)
     });
     this.orchestratorState = new OrchestratorStateStore(appDataRoot);
     this.orchestrator = new OrchestratorService({
@@ -76,7 +72,8 @@ export class AppController {
         }
         return this.runs.start(task, profile);
       },
-      appendEvent: (runId, event) => this.eventLog.append(runId, event)
+      appendEvent: (runId, event) => this.eventLog.append(runId, event),
+      terminateRun: (runId) => this.runs.cancel(runId)
     });
   }
 
@@ -192,41 +189,48 @@ export class AppController {
     return status;
   }
 
-  startScheduler(): Promise<SchedulerSnapshot> {
-    if (this.schedulerDisabled) {
-      return Promise.resolve(this.scheduler.stop());
-    }
-    return this.scheduler.start();
+  async startScheduler(): Promise<SchedulerSnapshot> {
+    await this.resumeOrchestrator();
+    return this.schedulerSnapshot();
   }
 
-  stopScheduler(): SchedulerSnapshot {
-    return this.scheduler.stop();
+  async stopScheduler(): Promise<SchedulerSnapshot> {
+    await this.pauseOrchestrator();
+    return this.schedulerSnapshot();
   }
 
   tickScheduler(): Promise<SchedulerSnapshot> {
-    return this.scheduler.tick();
+    return this.orchestrator.tick().then(orchestratorSnapshotToSchedulerSnapshot);
   }
 
-  schedulerSnapshot(): SchedulerSnapshot {
-    return this.scheduler.snapshot();
+  async schedulerSnapshot(): Promise<SchedulerSnapshot> {
+    return orchestratorSnapshotToSchedulerSnapshot(await this.orchestrator.snapshot());
   }
 
   async startOrchestrator(): Promise<OrchestratorState> {
-    this.schedulerDisabled = true;
-    this.scheduler.stop();
     return this.orchestrator.start();
   }
 
   async pauseOrchestrator(): Promise<OrchestratorState> {
-    const state = await this.orchestrator.pause();
-    this.schedulerDisabled = false;
-    return state;
+    return this.orchestrator.pause();
   }
 
   async resumeOrchestrator(): Promise<OrchestratorState> {
-    this.schedulerDisabled = true;
-    this.scheduler.stop();
     return this.orchestrator.resume();
+  }
+
+  async buildHandoff(runId: string) {
+    const run = await this.runs.get(runId);
+    const [task, proof, transcript] = await Promise.all([this.tasks.get(run.taskId), this.proof.list(runId), this.runs.getTranscript(runId)]);
+    const transcriptSummary = [...transcript].reverse().find((item) => item.role === "agent" || item.role === "system")?.text;
+    const draft = this.handoff.build({
+      task,
+      run,
+      proof,
+      ...(transcriptSummary ? { transcriptSummary } : {})
+    });
+    await this.eventLog.append(runId, { type: "handoff.built", message: draft.title, payload: draft });
+    return draft;
   }
 
   private async markRunReadyForReview(run: Run): Promise<void> {
@@ -247,4 +251,15 @@ export class AppController {
       await this.eventLog.append(run.id, { type: "linear.review_gate.failed", message: (error as Error).message });
     }
   }
+}
+
+function orchestratorSnapshotToSchedulerSnapshot(snapshot: Awaited<ReturnType<OrchestratorService["snapshot"]>>): SchedulerSnapshot {
+  return {
+    enabled: !snapshot.state.paused && snapshot.state.policy.autoStart,
+    running: snapshot.activeRuns,
+    queuedTaskIds: snapshot.queuedTaskIds,
+    retryQueue: snapshot.state.retryQueue.map((entry) => ({ ...entry })),
+    ...(snapshot.state.lastTickAt ? { lastPollAt: snapshot.state.lastTickAt } : {}),
+    ...(snapshot.state.lastError ? { lastError: snapshot.state.lastError } : {})
+  };
 }

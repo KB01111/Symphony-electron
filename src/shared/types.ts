@@ -69,6 +69,18 @@ export interface WorkspaceRef {
   promptPath?: string;
   workflowPrompt: string;
   repoCachePath?: string;
+  runtime: CodexRuntimeConfig;
+}
+
+export interface CodexRuntimeConfig {
+  command: string;
+  approvalPolicy?: unknown;
+  threadSandbox?: unknown;
+  turnSandboxPolicy?: unknown;
+  turnTimeoutMs: number;
+  readTimeoutMs: number;
+  stallTimeoutMs: number;
+  maxTurns: number;
 }
 
 export interface Run {
@@ -119,6 +131,7 @@ export interface AutomationPolicy {
   autoCreateHandoff: boolean;
   autoWriteTrackerUpdates: boolean;
   maxConcurrentRuns: number;
+  maxConcurrentRunsByState: Record<string, number>;
   pollIntervalSeconds: number;
   stallTimeoutSeconds: number;
   maxRetryBackoffSeconds: number;
@@ -169,6 +182,35 @@ export interface ApprovalRequest {
   status: ApprovalStatus;
   createdAt: string;
   resolvedAt?: string;
+}
+
+export type ProofKind = "test" | "ci" | "review" | "diff" | "pr" | "token_usage" | "rate_limit" | "summary";
+
+export type ProofStatus = "passed" | "failed" | "warning" | "unknown";
+
+export interface ProofEntry {
+  id: string;
+  runId: string;
+  kind: ProofKind;
+  label: string;
+  status: ProofStatus;
+  detail: string;
+  createdAt: string;
+}
+
+export interface ProofInput {
+  kind: ProofKind;
+  label: string;
+  status: ProofStatus;
+  detail: string;
+}
+
+export interface HandoffDraft {
+  runId: string;
+  taskId: string;
+  title: string;
+  body: string;
+  createdAt: string;
 }
 
 export interface HealthCheckResult {
@@ -279,6 +321,12 @@ export interface SymphonyApi {
     resume(): Promise<OrchestratorState>;
     tick(): Promise<OrchestratorSnapshot>;
     updatePolicy(policy: Partial<AutomationPolicy>): Promise<OrchestratorState>;
+  };
+  proof: {
+    list(runId: string): Promise<ProofEntry[]>;
+  };
+  handoff: {
+    build(runId: string): Promise<HandoffDraft>;
   };
   logs: {
     tail(runId: string): Promise<RunEvent[]>;

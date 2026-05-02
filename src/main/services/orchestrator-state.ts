@@ -7,6 +7,7 @@ export const defaultAutomationPolicy: AutomationPolicy = {
   autoCreateHandoff: true,
   autoWriteTrackerUpdates: false,
   maxConcurrentRuns: 2,
+  maxConcurrentRunsByState: {},
   pollIntervalSeconds: 60,
   stallTimeoutSeconds: 1800,
   maxRetryBackoffSeconds: 300,
@@ -18,6 +19,7 @@ function cloneAutomationPolicy(policy: AutomationPolicy): AutomationPolicy {
   return {
     ...policy,
     terminalStateNames: [...policy.terminalStateNames],
+    maxConcurrentRunsByState: { ...policy.maxConcurrentRunsByState },
     requireApprovalFor: [...policy.requireApprovalFor]
   };
 }

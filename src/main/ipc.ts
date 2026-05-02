@@ -11,12 +11,6 @@ export function registerIpc(controller: AppController): void {
       window.webContents.send("events:transcriptItem", transcriptItem);
     }
   });
-  controller.scheduler.onSnapshot((snapshot) => {
-    for (const window of BrowserWindow.getAllWindows()) {
-      window.webContents.send("events:scheduler", snapshot);
-    }
-  });
-
   ipcMain.handle("profiles:list", () => controller.profiles.list());
   ipcMain.handle("profiles:create", (_event, input: { name: string }) => controller.profiles.create(input));
   ipcMain.handle("profiles:startLogin", (_event, profileId: string) => controller.profiles.startLogin(profileId));
@@ -59,6 +53,9 @@ export function registerIpc(controller: AppController): void {
   ipcMain.handle("orchestrator:resume", () => controller.resumeOrchestrator());
   ipcMain.handle("orchestrator:tick", () => controller.orchestrator.tick());
   ipcMain.handle("orchestrator:updatePolicy", (_event, policy: Partial<AutomationPolicy>) => controller.orchestrator.updatePolicy(policy));
+
+  ipcMain.handle("proof:list", (_event, runId: string) => controller.proof.list(runId));
+  ipcMain.handle("handoff:build", (_event, runId: string) => controller.buildHandoff(runId));
 
   ipcMain.handle("logs:tail", (_event, runId: string) => controller.eventLog.replay(runId));
   ipcMain.handle("logs:export", (_event, runId: string) => controller.eventLog.exportPath(runId));

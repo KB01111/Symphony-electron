@@ -8,6 +8,7 @@ type OrchestratorDependencies = {
   listRuns(): Promise<Run[]>;
   startRun(task: Task): Promise<Run>;
   appendEvent(runId: string, event: RunEventInput): Promise<unknown>;
+  terminateRun?(runId: string): Promise<Run | void>;
   now?: () => Date;
 };
 
@@ -87,25 +88,61 @@ export class OrchestratorService {
     const nowIso = now.toISOString();
     const activeRuns = runs.filter((run) => ACTIVE_RUN_STATES.has(run.state));
     const runsById = new Map(runs.map((run) => [run.id, run]));
+    const candidatesById = new Map(candidates.map((candidate) => [candidate.id, candidate]));
     const launchedTaskIds = new Set(runs.map((run) => run.taskId));
     const activeTaskIds = new Set(activeRuns.map((run) => run.taskId));
-    const activeClaims = state.activeClaims.filter((claim) => {
-      const run = runsById.get(claim.runId);
-      return run ? ACTIVE_RUN_STATES.has(run.state) : false;
-    });
-    const claimedTaskIds = new Set(activeClaims.map((claim) => claim.taskId));
-    let activeCount = new Set([...activeTaskIds, ...claimedTaskIds]).size;
+    const terminalStateNames = new Set(state.policy.terminalStateNames.map(normalize));
     const queuedTaskIds: string[] = [];
     const retryQueueByTaskId = new Map(state.retryQueue.map((entry) => [entry.taskId, entry]));
+    const activeClaims: OrchestratorState["activeClaims"] = [];
     const next: OrchestratorState = {
       ...state,
       activeClaims,
       retryQueue: [...retryQueueByTaskId.values()],
       lastTickAt: nowIso
     };
+    const stateConcurrency = new Map<string, number>();
+
+    for (const claim of state.activeClaims) {
+      const run = runsById.get(claim.runId);
+      if (!run || !ACTIVE_RUN_STATES.has(run.state)) {
+        continue;
+      }
+      const task = candidatesById.get(claim.taskId);
+      if (task && terminalStateNames.has(normalize(task.status))) {
+        await this.cancelClaim(claim.runId, "tracker_terminal", "Tracker moved to a terminal state.");
+        continue;
+      }
+      const lastActivity = new Date(claim.lastEventAt ?? run.updatedAt ?? claim.startedAt).getTime();
+      const stalled = next.policy.stallTimeoutSeconds > 0 && now.getTime() - lastActivity > next.policy.stallTimeoutSeconds * 1000;
+      if (stalled) {
+        await this.cancelClaim(claim.runId, "orchestrator.stalled", "Run exceeded stall timeout.");
+        const attempts = (retryQueueByTaskId.get(claim.taskId)?.attempts ?? 0) + 1;
+        retryQueueByTaskId.set(claim.taskId, {
+          taskId: claim.taskId,
+          attempts,
+          nextAttemptAt: nextRetryAt(now, attempts, next.policy.maxRetryBackoffSeconds),
+          lastError: "stalled"
+        });
+        continue;
+      }
+      const lastEventAt = newerIso(claim.lastEventAt, run.updatedAt);
+      const activeClaim = lastEventAt ? { ...claim, lastEventAt } : { ...claim };
+      activeClaims.push(activeClaim);
+      const stateKey = normalize(task?.status ?? run.state);
+      stateConcurrency.set(stateKey, (stateConcurrency.get(stateKey) ?? 0) + 1);
+    }
+    next.retryQueue = [...retryQueueByTaskId.values()];
+    const claimedTaskIds = new Set(activeClaims.map((claim) => claim.taskId));
+    let activeCount = new Set([...activeTaskIds, ...claimedTaskIds]).size;
 
     for (const candidate of candidates) {
       if (claimedTaskIds.has(candidate.id) || launchedTaskIds.has(candidate.id)) {
+        continue;
+      }
+
+      if (!passesBlockerGate(candidate, terminalStateNames)) {
+        queuedTaskIds.push(candidate.id);
         continue;
       }
 
@@ -125,16 +162,22 @@ export class OrchestratorService {
         continue;
       }
 
+      const stateKey = normalize(candidate.status);
+      const stateLimit = next.policy.maxConcurrentRunsByState[stateKey];
+      if (stateLimit !== undefined && (stateConcurrency.get(stateKey) ?? 0) >= stateLimit) {
+        queuedTaskIds.push(candidate.id);
+        continue;
+      }
+
       let run: Run;
       try {
         run = await this.dependencies.startRun(candidate);
       } catch (error) {
         const attempts = (retryQueueByTaskId.get(candidate.id)?.attempts ?? 0) + 1;
-        const backoffSeconds = Math.min(10 * 2 ** (attempts - 1), next.policy.maxRetryBackoffSeconds);
         retryQueueByTaskId.set(candidate.id, {
           taskId: candidate.id,
           attempts,
-          nextAttemptAt: new Date(now.getTime() + backoffSeconds * 1000).toISOString(),
+          nextAttemptAt: nextRetryAt(now, attempts, next.policy.maxRetryBackoffSeconds),
           lastError: (error as Error).message
         });
         next.retryQueue = [...retryQueueByTaskId.values()];
@@ -150,6 +193,7 @@ export class OrchestratorService {
       claimedTaskIds.add(candidate.id);
       activeTaskIds.add(candidate.id);
       activeCount += 1;
+      stateConcurrency.set(stateKey, (stateConcurrency.get(stateKey) ?? 0) + 1);
       retryQueueByTaskId.delete(candidate.id);
       next.retryQueue = [...retryQueueByTaskId.values()];
 
@@ -169,6 +213,15 @@ export class OrchestratorService {
       queuedTaskIds,
       activeRuns: next.activeClaims.map((claim) => ({ id: claim.runId, taskId: claim.taskId }))
     };
+  }
+
+  private async cancelClaim(runId: string, type: string, message: string): Promise<void> {
+    await this.dependencies.terminateRun?.(runId);
+    try {
+      await this.dependencies.appendEvent(runId, { type, message });
+    } catch {
+      // Reconciliation must continue even if the event log is temporarily unavailable.
+    }
   }
 
   private schedule(intervalSeconds: number): void {
@@ -223,4 +276,24 @@ export class OrchestratorService {
       this.schedule(RECOVERY_POLL_INTERVAL_SECONDS);
     }
   }
+}
+
+function normalize(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function passesBlockerGate(task: Task, terminalStateNames: Set<string>): boolean {
+  if (normalize(task.status) !== "todo") return true;
+  return (task.blockers ?? []).every((blocker) => blocker.state && terminalStateNames.has(normalize(blocker.state)));
+}
+
+function nextRetryAt(now: Date, attempts: number, maxBackoffSeconds: number): string {
+  const backoffSeconds = Math.min(10 * 2 ** Math.max(attempts - 1, 0), maxBackoffSeconds);
+  return new Date(now.getTime() + backoffSeconds * 1000).toISOString();
+}
+
+function newerIso(current: string | undefined, candidate: string | undefined): string | undefined {
+  if (!current) return candidate;
+  if (!candidate) return current;
+  return candidate > current ? candidate : current;
 }
