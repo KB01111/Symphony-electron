@@ -179,6 +179,7 @@ export class RunService {
         updatedAt: isoNow()
       });
     } catch (error) {
+      this.active.get(run.id)?.close();
       this.active.delete(run.id);
       await this.cleanupApprovalWaitersForRun(run.id);
       const failed = await this.get(run.id).catch(() => run);
