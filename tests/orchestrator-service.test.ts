@@ -161,6 +161,45 @@ test("due retry entries are allowed and cleared on successful start", async () =
   expect(snapshot.state.retryQueue).toEqual([]);
 });
 
+test("event logging failures after a successful start keep the active claim without retrying", async () => {
+  let state: OrchestratorState = {
+    ...defaultOrchestratorState(),
+    retryQueue: [
+      {
+        taskId: "a",
+        attempts: 1,
+        nextAttemptAt: "2026-05-02T09:59:00.000Z",
+        lastError: "previous failure"
+      }
+    ]
+  };
+  const service = new OrchestratorService({
+    readState: async () => state,
+    writeState: async (next) => {
+      state = next;
+    },
+    listCandidateTasks: async () => [task("a")],
+    listRuns: async () => [],
+    startRun: async (candidate) => run(`run-${candidate.id}`, candidate.id),
+    appendEvent: async () => {
+      throw new Error("event log unavailable");
+    },
+    now: () => new Date("2026-05-02T10:00:00.000Z")
+  });
+
+  const snapshot = await service.tick();
+
+  expect(snapshot.state.activeClaims).toEqual([
+    {
+      taskId: "a",
+      runId: "run-a",
+      identifier: "A",
+      startedAt: "2026-05-02T10:00:00.000Z"
+    }
+  ]);
+  expect(snapshot.state.retryQueue).toEqual([]);
+});
+
 test("failed starts replace and increment retry entries instead of duplicating them", async () => {
   let state: OrchestratorState = {
     ...defaultOrchestratorState(),
@@ -199,13 +238,57 @@ test("failed starts replace and increment retry entries instead of duplicating t
   ]);
 });
 
+test("orphaned active claims are dropped before enforcing concurrency", async () => {
+  let state: OrchestratorState = {
+    ...defaultOrchestratorState(),
+    activeClaims: [
+      {
+        taskId: "orphaned",
+        runId: "missing-run",
+        identifier: "ORPHANED",
+        startedAt: "2026-05-02T09:55:00.000Z"
+      }
+    ],
+    policy: {
+      ...defaultOrchestratorState().policy,
+      maxConcurrentRuns: 1
+    }
+  };
+  const started: string[] = [];
+  const service = new OrchestratorService({
+    readState: async () => state,
+    writeState: async (next) => {
+      state = next;
+    },
+    listCandidateTasks: async () => [task("a")],
+    listRuns: async () => [],
+    startRun: async (candidate) => {
+      started.push(candidate.id);
+      return run(`run-${candidate.id}`, candidate.id);
+    },
+    appendEvent: async () => undefined,
+    now: () => new Date("2026-05-02T10:00:00.000Z")
+  });
+
+  const snapshot = await service.tick();
+
+  expect(started).toEqual(["a"]);
+  expect(snapshot.queuedTaskIds).toEqual([]);
+  expect(snapshot.state.activeClaims.map((claim) => claim.taskId)).toEqual(["a"]);
+});
+
 test("overlapping ticks do not duplicate starts for the same candidate", async () => {
   let state: OrchestratorState = defaultOrchestratorState();
+  const runs: Run[] = [];
   let releaseStartRun: (() => void) | undefined;
   const startRun = vi.fn(
     async (candidate: Task) =>
       new Promise<Run>((resolve) => {
-        releaseStartRun = () => resolve(run(`run-${candidate.id}`, candidate.id));
+        releaseStartRun = () => {
+          const startedRun = run(`run-${candidate.id}`, candidate.id);
+          runs.push(startedRun);
+          resolve(startedRun);
+        };
       })
   );
   const service = new OrchestratorService({
@@ -214,7 +297,7 @@ test("overlapping ticks do not duplicate starts for the same candidate", async (
       state = next;
     },
     listCandidateTasks: async () => [task("a")],
-    listRuns: async () => [],
+    listRuns: async () => runs,
     startRun,
     appendEvent: async () => undefined,
     now: () => new Date("2026-05-02T10:00:00.000Z")
@@ -258,4 +341,38 @@ test("pause waits behind an in-flight tick and final state remains paused", asyn
 
   expect(paused.paused).toBe(true);
   expect(state.paused).toBe(true);
+});
+
+test("queued pause prevents a finishing scheduled tick from scheduling another timer", async () => {
+  vi.useFakeTimers();
+  try {
+    let state: OrchestratorState = { ...defaultOrchestratorState(), policy: { ...defaultOrchestratorState().policy, pollIntervalSeconds: 1 } };
+    let releaseStartRun: (() => void) | undefined;
+    const service = new OrchestratorService({
+      readState: async () => state,
+      writeState: async (next) => {
+        state = next;
+      },
+      listCandidateTasks: async () => [task("a")],
+      listRuns: async () => [],
+      startRun: async (candidate) =>
+        new Promise<Run>((resolve) => {
+          releaseStartRun = () => resolve(run(`run-${candidate.id}`, candidate.id));
+        }),
+      appendEvent: async () => undefined,
+      now: () => new Date("2026-05-02T10:00:00.000Z")
+    });
+
+    await service.start();
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.waitFor(() => expect(releaseStartRun).toBeDefined());
+
+    const pause = service.pause();
+    releaseStartRun?.();
+    await pause;
+
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
 });

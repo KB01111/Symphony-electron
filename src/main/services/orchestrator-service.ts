@@ -17,6 +17,7 @@ export class OrchestratorService {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly now: () => Date;
   private mutationQueue: Promise<void> = Promise.resolve();
+  private pauseRequested = false;
 
   constructor(private readonly dependencies: OrchestratorDependencies) {
     this.now = dependencies.now ?? (() => new Date());
@@ -26,6 +27,7 @@ export class OrchestratorService {
     return this.enqueueMutation(async () => {
       const current = await this.dependencies.readState();
       const next: OrchestratorState = { ...current, mode: "autonomous", paused: false };
+      this.pauseRequested = false;
       await this.dependencies.writeState(next);
       this.schedule(next.policy.pollIntervalSeconds);
       return next;
@@ -33,6 +35,7 @@ export class OrchestratorService {
   }
 
   async pause(): Promise<OrchestratorState> {
+    this.pauseRequested = true;
     this.clearTimer();
     return this.enqueueMutation(async () => {
       const current = await this.dependencies.readState();
@@ -83,10 +86,9 @@ export class OrchestratorService {
     const activeRuns = runs.filter((run) => ACTIVE_RUN_STATES.has(run.state));
     const runsById = new Map(runs.map((run) => [run.id, run]));
     const activeTaskIds = new Set(activeRuns.map((run) => run.taskId));
-    const activeRunIds = new Set(activeRuns.map((run) => run.id));
     const activeClaims = state.activeClaims.filter((claim) => {
       const run = runsById.get(claim.runId);
-      return run ? ACTIVE_RUN_STATES.has(run.state) : true;
+      return run ? ACTIVE_RUN_STATES.has(run.state) : false;
     });
     const claimedTaskIds = new Set(activeClaims.map((claim) => claim.taskId));
     let activeCount = new Set([...activeTaskIds, ...claimedTaskIds]).size;
@@ -120,24 +122,9 @@ export class OrchestratorService {
         continue;
       }
 
+      let run: Run;
       try {
-        const run = await this.dependencies.startRun(candidate);
-        next.activeClaims.push({
-          taskId: candidate.id,
-          runId: run.id,
-          identifier: candidate.identifier,
-          startedAt: run.startedAt ?? nowIso
-        });
-        claimedTaskIds.add(candidate.id);
-        activeTaskIds.add(candidate.id);
-        activeRunIds.add(run.id);
-        activeCount += 1;
-        retryQueueByTaskId.delete(candidate.id);
-        next.retryQueue = [...retryQueueByTaskId.values()];
-        await this.dependencies.appendEvent(run.id, {
-          type: "orchestrator.claimed",
-          message: `Autonomous orchestrator claimed ${candidate.identifier}.`
-        });
+        run = await this.dependencies.startRun(candidate);
       } catch (error) {
         const attempts = (retryQueueByTaskId.get(candidate.id)?.attempts ?? 0) + 1;
         const backoffSeconds = Math.min(10 * 2 ** (attempts - 1), next.policy.maxRetryBackoffSeconds);
@@ -148,6 +135,28 @@ export class OrchestratorService {
           lastError: (error as Error).message
         });
         next.retryQueue = [...retryQueueByTaskId.values()];
+        continue;
+      }
+
+      next.activeClaims.push({
+        taskId: candidate.id,
+        runId: run.id,
+        identifier: candidate.identifier,
+        startedAt: run.startedAt ?? nowIso
+      });
+      claimedTaskIds.add(candidate.id);
+      activeTaskIds.add(candidate.id);
+      activeCount += 1;
+      retryQueueByTaskId.delete(candidate.id);
+      next.retryQueue = [...retryQueueByTaskId.values()];
+
+      try {
+        await this.dependencies.appendEvent(run.id, {
+          type: "orchestrator.claimed",
+          message: `Autonomous orchestrator claimed ${candidate.identifier}.`
+        });
+      } catch {
+        // Event logging must not requeue work after the run has already started.
       }
     }
 
@@ -165,7 +174,7 @@ export class OrchestratorService {
       this.timer = undefined;
       void this.tick()
         .then((snapshot) => {
-          if (!snapshot.state.paused && snapshot.state.policy.autoStart) {
+          if (!this.pauseRequested && !snapshot.state.paused && snapshot.state.policy.autoStart) {
             this.schedule(snapshot.state.policy.pollIntervalSeconds);
           }
         })
@@ -175,7 +184,7 @@ export class OrchestratorService {
             await this.dependencies.writeState({ ...currentState, lastError: (error as Error).message });
             return currentState;
           });
-          if (!current.paused && current.policy.autoStart) {
+          if (!this.pauseRequested && !current.paused && current.policy.autoStart) {
             this.schedule(current.policy.pollIntervalSeconds);
           }
         });
