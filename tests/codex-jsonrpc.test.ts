@@ -34,3 +34,27 @@ test("client resolves matching responses and emits notifications", async () => {
   expect(notifications).toEqual([{ method: "turn/started", params: { turnId: "turn-1" } }]);
 });
 
+test("client emits server requests separately from notifications and responses", () => {
+  const transport = {
+    write: vi.fn(),
+    close: vi.fn()
+  };
+  const client = new CodexJsonRpcClient(transport);
+  const notifications: unknown[] = [];
+  const requests: unknown[] = [];
+
+  client.onNotification((message) => notifications.push(message));
+  client.onRequest((message) => requests.push(message));
+
+  client.acceptLine('{"id":"approval-1","method":"item/commandExecution/requestApproval","params":{"command":"npm test"}}');
+
+  expect(requests).toEqual([
+    {
+      id: "approval-1",
+      method: "item/commandExecution/requestApproval",
+      params: { command: "npm test" }
+    }
+  ]);
+  expect(notifications).toEqual([]);
+});
+

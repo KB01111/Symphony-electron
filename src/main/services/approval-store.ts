@@ -14,6 +14,7 @@ export interface CreateApprovalInput {
 
 export class ApprovalStore {
   private readonly store: FileStateStore<ApprovalRequest[]>;
+  private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(appDataRoot: string) {
     this.store = new FileStateStore<ApprovalRequest[]>(path.join(appDataRoot, "state", "approvals.json"), []);
@@ -25,9 +26,11 @@ export class ApprovalStore {
       ...input,
       createdAt: isoNow()
     };
-    const approvals = await this.store.read();
-    approvals.push(request);
-    await this.store.write(approvals);
+    await this.serializeWrite(async () => {
+      const approvals = await this.store.read();
+      approvals.push(request);
+      await this.store.write(approvals);
+    });
     return request;
   }
 
@@ -41,22 +44,33 @@ export class ApprovalStore {
   }
 
   async respond(requestId: string, approved: boolean): Promise<ApprovalRequest> {
-    const approvals = await this.store.read();
-    const index = approvals.findIndex((request) => request.id === requestId);
-    if (index < 0) {
-      throw new Error(`Unknown approval request: ${requestId}`);
-    }
-    const request = approvals[index];
-    if (!request) {
-      throw new Error(`Unknown approval request: ${requestId}`);
-    }
-    const updated: ApprovalRequest = {
-      ...request,
-      approved,
-      respondedAt: isoNow()
-    };
-    approvals[index] = updated;
-    await this.store.write(approvals);
-    return updated;
+    return this.serializeWrite(async () => {
+      const approvals = await this.store.read();
+      const index = approvals.findIndex((request) => request.id === requestId);
+      if (index < 0) {
+        throw new Error(`Unknown approval request: ${requestId}`);
+      }
+      const request = approvals[index];
+      if (!request) {
+        throw new Error(`Unknown approval request: ${requestId}`);
+      }
+      const updated: ApprovalRequest = {
+        ...request,
+        approved,
+        respondedAt: isoNow()
+      };
+      approvals[index] = updated;
+      await this.store.write(approvals);
+      return updated;
+    });
+  }
+
+  private serializeWrite<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.writeQueue.then(operation, operation);
+    this.writeQueue = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
   }
 }

@@ -48,6 +48,7 @@ export class CodexJsonRpcClient {
   private nextId = 1;
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
   private readonly notifications = new Set<(message: JsonRpcNotification) => void>();
+  private readonly requests = new Set<(message: JsonRpcRequest) => void>();
   private readonly buffer = new JsonRpcLineBuffer();
 
   constructor(private readonly transport: JsonRpcTransport) {}
@@ -84,6 +85,11 @@ export class CodexJsonRpcClient {
     return () => this.notifications.delete(callback);
   }
 
+  onRequest(callback: (message: JsonRpcRequest) => void): () => void {
+    this.requests.add(callback);
+    return () => this.requests.delete(callback);
+  }
+
   close(): void {
     this.transport.close();
     for (const [id, pending] of this.pending) {
@@ -107,6 +113,13 @@ export class CodexJsonRpcClient {
 
     if ("method" in message && !("id" in message)) {
       for (const callback of this.notifications) {
+        callback(message);
+      }
+      return;
+    }
+
+    if ("id" in message && "method" in message && !("result" in message) && !("error" in message)) {
+      for (const callback of this.requests) {
         callback(message);
       }
     }

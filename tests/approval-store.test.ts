@@ -32,3 +32,71 @@ test("captures pending approval requests and records decisions", async () => {
   expect(await store.listPending()).toEqual([]);
   expect((await store.list()).find((item) => item.id === request.id)).toMatchObject({ approved: true });
 });
+
+test("throws when responding to an unknown approval request", async () => {
+  const store = new ApprovalStore(await tempRoot());
+
+  await expect(store.respond("approval-missing", true)).rejects.toThrow("Unknown approval request: approval-missing");
+});
+
+test("lists approvals filtered by run id", async () => {
+  const store = new ApprovalStore(await tempRoot());
+  const run1 = await store.create({
+    runId: "run-1",
+    kind: "command",
+    title: "Run tests",
+    detail: "npm test",
+    payload: { command: "npm test" }
+  });
+  await store.create({
+    runId: "run-2",
+    kind: "patch",
+    title: "Apply patch",
+    detail: "patch",
+    payload: { path: "src/app.ts" }
+  });
+
+  expect(await store.list("run-1")).toEqual([run1]);
+});
+
+test("persists approvals across store instances and records rejected decisions", async () => {
+  const root = await tempRoot();
+  const store = new ApprovalStore(root);
+  const request = await store.create({
+    runId: "run-1",
+    kind: "network",
+    title: "Fetch",
+    detail: "curl example.com",
+    payload: { host: "example.com" }
+  });
+
+  await store.respond(request.id, false);
+
+  const reloaded = new ApprovalStore(root);
+  expect(await reloaded.list()).toMatchObject([
+    {
+      id: request.id,
+      runId: "run-1",
+      approved: false
+    }
+  ]);
+});
+
+test("does not lose concurrent approval creates", async () => {
+  const store = new ApprovalStore(await tempRoot());
+
+  await Promise.all(
+    Array.from({ length: 20 }, (_, index) =>
+      store.create({
+        runId: index % 2 === 0 ? "run-even" : "run-odd",
+        kind: "command",
+        title: `Command ${index}`,
+        detail: `command-${index}`,
+        payload: { index }
+      })
+    )
+  );
+
+  expect(await store.list()).toHaveLength(20);
+  expect(await store.list("run-even")).toHaveLength(10);
+});

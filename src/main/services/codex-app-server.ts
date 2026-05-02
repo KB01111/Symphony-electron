@@ -11,6 +11,7 @@ export interface CodexAppServerOptions {
   onStdout?(chunk: string): void;
   onStderr?(chunk: string): void;
   onNotification?(method: string, params: unknown): void;
+  onRequest?(method: string, params: unknown, id: string | number): void;
   onExit?(exitCode: number | null, signal: NodeJS.Signals | null): void;
 }
 
@@ -30,6 +31,7 @@ export class CodexAppServerProcess {
       close: () => this.child.kill()
     });
     this.client.onNotification((notification) => options.onNotification?.(notification.method, notification.params));
+    this.client.onRequest((request) => options.onRequest?.(request.method, request.params, request.id));
     this.child.stdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       options.onStdout?.(text);

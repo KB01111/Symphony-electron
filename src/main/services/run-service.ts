@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import type { ApprovalKind, Profile, Run, Task } from "../../shared/types.js";
 import { ApprovalStore } from "./approval-store.js";
 import { FileStateStore } from "./file-state.js";
-import { JsonlEventLog } from "./event-log.js";
+import { JsonlEventLog, type RunEventInput } from "./event-log.js";
 import { isoNow } from "./time.js";
 import { WorkspaceManager } from "./workspace-manager.js";
 import { CodexAppServerProcess } from "./codex-app-server.js";
@@ -91,6 +91,7 @@ export class RunService {
         onStdout: (chunk) => void this.eventLog.append(run.id, { type: "codex.stdout", stream: "stdout", message: chunk }),
         onStderr: (chunk) => void this.eventLog.append(run.id, { type: "codex.stderr", stream: "stderr", message: chunk }),
         onNotification: (method, params) => void this.handleNotification(run, method, params),
+        onRequest: (method, params, id) => void this.handleRequest(run, method, params, id),
         onExit: (exitCode, signal) => {
           this.active.delete(run.id);
           void this.handleExit(run.id, exitCode, signal);
@@ -132,15 +133,41 @@ export class RunService {
   }
 
   private async handleNotification(run: Run, method: string, params: unknown): Promise<void> {
-    await this.eventLog.append(run.id, { type: `codex.${method}`, payload: params });
-    if (!isApprovalNotification(method)) return;
-    await this.approvals.create({
-      runId: run.id,
-      kind: inferApprovalKind(method, params),
-      title: method,
-      detail: stringifyApprovalDetail(params),
-      payload: params
-    });
+    await this.safeAppendEvent(run.id, { type: `codex.${method}`, payload: params });
+    if (!isApprovalRequestMethod(method)) return;
+    await this.captureApproval(run, method, params);
+  }
+
+  private async handleRequest(run: Run, method: string, params: unknown, id: string | number): Promise<void> {
+    await this.safeAppendEvent(run.id, { type: `codex.${method}`, payload: { requestId: id, params } });
+    if (!isApprovalRequestMethod(method)) return;
+    await this.captureApproval(run, method, params);
+  }
+
+  private async captureApproval(run: Run, method: string, params: unknown): Promise<void> {
+    try {
+      await this.approvals.create({
+        runId: run.id,
+        kind: inferApprovalKind(method, params),
+        title: method,
+        detail: stringifyApprovalDetail(params),
+        payload: params
+      });
+    } catch (error) {
+      await this.safeAppendEvent(run.id, {
+        type: "approval.capture_failed",
+        message: (error as Error).message,
+        payload: { method, params }
+      });
+    }
+  }
+
+  private async safeAppendEvent(runId: string, input: RunEventInput): Promise<void> {
+    try {
+      await this.eventLog.append(runId, input);
+    } catch {
+      // Approval capture and Codex event handling must not break the running session.
+    }
   }
 
   private async patch(runId: string, patch: Partial<Run>): Promise<Run> {
@@ -162,15 +189,13 @@ export class RunService {
   }
 }
 
-function isApprovalNotification(method: string): boolean {
+export function isApprovalRequestMethod(method: string): boolean {
   const normalized = method.toLowerCase();
   return (
-    normalized.includes("request_approval") ||
-    normalized.includes("approval") ||
-    normalized.includes("file_change") ||
-    normalized.includes("filechange") ||
-    normalized.includes("command_execution") ||
-    normalized.includes("commandexecution")
+    normalized === "requestapproval" ||
+    normalized === "request_approval" ||
+    normalized.endsWith("/requestapproval") ||
+    normalized.endsWith("/request_approval")
   );
 }
 
