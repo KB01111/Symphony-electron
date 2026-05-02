@@ -70,6 +70,14 @@ export class CodexJsonRpcClient {
     this.transport.write(`${JSON.stringify({ method, params })}\n`);
   }
 
+  respond(id: JsonRpcId, result: unknown): void {
+    this.transport.write(`${JSON.stringify({ id, result })}\n`);
+  }
+
+  respondError(id: JsonRpcId, code: number, message: string, data?: unknown): void {
+    this.transport.write(`${JSON.stringify({ id, error: { code, message, ...(data === undefined ? {} : { data }) } })}\n`);
+  }
+
   acceptChunk(chunk: string): void {
     for (const message of this.buffer.push(chunk)) {
       this.acceptMessage(message);

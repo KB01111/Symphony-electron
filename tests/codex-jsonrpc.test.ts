@@ -58,3 +58,22 @@ test("client emits server requests separately from notifications and responses",
   expect(notifications).toEqual([]);
 });
 
+test("client writes JSON-RPC responses for server requests", () => {
+  const written: string[] = [];
+  const transport = {
+    write: vi.fn((line: string) => {
+      written.push(line);
+    }),
+    close: vi.fn()
+  };
+  const client = new CodexJsonRpcClient(transport);
+
+  client.respond("approval-1", { decision: "accept" });
+  client.respondError("approval-2", -32000, "denied", { reason: "operator" });
+
+  expect(written.map((line) => JSON.parse(line))).toEqual([
+    { id: "approval-1", result: { decision: "accept" } },
+    { id: "approval-2", error: { code: -32000, message: "denied", data: { reason: "operator" } } }
+  ]);
+});
+

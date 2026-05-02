@@ -88,6 +88,8 @@ export class AppController {
   }
 
   async respondToApproval(requestId: string, approved: boolean): Promise<void> {
+    const pending = await this.approvals.get(requestId);
+    await this.runs.respondToApproval(pending, approved);
     const request = await this.approvals.respond(requestId, approved);
     await this.eventLog.append(request.runId, {
       type: "approval.responded",

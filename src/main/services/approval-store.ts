@@ -6,6 +6,8 @@ import { isoNow } from "./time.js";
 
 export interface CreateApprovalInput {
   runId: string;
+  protocolRequestId?: string | number;
+  protocolMethod?: string;
   kind: ApprovalKind;
   title: string;
   detail: string;
@@ -43,6 +45,14 @@ export class ApprovalStore {
     return (await this.list()).filter((request) => request.approved === undefined);
   }
 
+  async get(requestId: string): Promise<ApprovalRequest> {
+    const request = (await this.store.read()).find((candidate) => candidate.id === requestId);
+    if (!request) {
+      throw new Error(`Unknown approval request: ${requestId}`);
+    }
+    return request;
+  }
+
   async respond(requestId: string, approved: boolean): Promise<ApprovalRequest> {
     return this.serializeWrite(async () => {
       const approvals = await this.store.read();
@@ -50,10 +60,7 @@ export class ApprovalStore {
       if (index < 0) {
         throw new Error(`Unknown approval request: ${requestId}`);
       }
-      const request = approvals[index];
-      if (!request) {
-        throw new Error(`Unknown approval request: ${requestId}`);
-      }
+      const request = approvals[index] as ApprovalRequest;
       const updated: ApprovalRequest = {
         ...request,
         approved,

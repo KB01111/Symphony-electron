@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { InitializeParams } from "../../generated/codex-app-server/InitializeParams.js";
+import type { JsonRpcId } from "./codex-jsonrpc.js";
 import type { ThreadStartParams } from "../../generated/codex-app-server/v2/ThreadStartParams.js";
 import type { ThreadStartResponse } from "../../generated/codex-app-server/v2/ThreadStartResponse.js";
 import type { TurnStartParams } from "../../generated/codex-app-server/v2/TurnStartParams.js";
@@ -11,7 +12,7 @@ export interface CodexAppServerOptions {
   onStdout?(chunk: string): void;
   onStderr?(chunk: string): void;
   onNotification?(method: string, params: unknown): void;
-  onRequest?(method: string, params: unknown, id: string | number): void;
+  onRequest?(method: string, params: unknown, id: JsonRpcId): void;
   onExit?(exitCode: number | null, signal: NodeJS.Signals | null): void;
 }
 
@@ -80,6 +81,14 @@ export class CodexAppServerProcess {
 
   close(): void {
     this.client.close();
+  }
+
+  respondToRequest(id: JsonRpcId, result: unknown): void {
+    this.client.respond(id, result);
+  }
+
+  rejectRequest(id: JsonRpcId, code: number, message: string, data?: unknown): void {
+    this.client.respondError(id, code, message, data);
   }
 }
 

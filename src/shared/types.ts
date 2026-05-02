@@ -126,6 +126,8 @@ export interface OrchestratorSnapshot {
 export interface ApprovalRequest {
   id: string;
   runId: string;
+  protocolRequestId?: string | number;
+  protocolMethod?: string;
   kind: ApprovalKind;
   title: string;
   detail: string;

@@ -20,6 +20,8 @@ test("captures pending approval requests and records decisions", async () => {
   const store = new ApprovalStore(await tempRoot());
   const request = await store.create({
     runId: "run-1",
+    protocolRequestId: "protocol-1",
+    protocolMethod: "item/commandExecution/requestApproval",
     kind: "command",
     title: "Run npm test",
     detail: "npm test",
@@ -30,7 +32,11 @@ test("captures pending approval requests and records decisions", async () => {
 
   await store.respond(request.id, true);
   expect(await store.listPending()).toEqual([]);
-  expect((await store.list()).find((item) => item.id === request.id)).toMatchObject({ approved: true });
+  expect((await store.list()).find((item) => item.id === request.id)).toMatchObject({
+    approved: true,
+    protocolRequestId: "protocol-1",
+    protocolMethod: "item/commandExecution/requestApproval"
+  });
 });
 
 test("throws when responding to an unknown approval request", async () => {

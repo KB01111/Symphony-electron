@@ -2,7 +2,8 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
-import type { ApprovalKind, Profile, Run, Task } from "../../shared/types.js";
+import type { ApprovalKind, ApprovalRequest, Profile, Run, Task } from "../../shared/types.js";
+import type { JsonRpcId } from "./codex-jsonrpc.js";
 import { ApprovalStore } from "./approval-store.js";
 import { FileStateStore } from "./file-state.js";
 import { JsonlEventLog, type RunEventInput } from "./event-log.js";
@@ -138,16 +139,26 @@ export class RunService {
     await this.captureApproval(run, method, params);
   }
 
-  private async handleRequest(run: Run, method: string, params: unknown, id: string | number): Promise<void> {
-    await this.safeAppendEvent(run.id, { type: `codex.${method}`, payload: { requestId: id, params } });
-    if (!isApprovalRequestMethod(method)) return;
-    await this.captureApproval(run, method, params);
+  async respondToApproval(request: ApprovalRequest, approved: boolean): Promise<void> {
+    if (request.protocolRequestId === undefined || !request.protocolMethod) return;
+    const process = this.active.get(request.runId);
+    if (!process) {
+      throw new Error(`Cannot respond to approval for inactive run: ${request.runId}`);
+    }
+    process.respondToRequest(request.protocolRequestId, approvalResponseFor(request.protocolMethod, request.payload, approved));
   }
 
-  private async captureApproval(run: Run, method: string, params: unknown): Promise<void> {
+  private async handleRequest(run: Run, method: string, params: unknown, id: JsonRpcId): Promise<void> {
+    await this.safeAppendEvent(run.id, { type: `codex.${method}`, payload: { requestId: id, params } });
+    if (!isApprovalRequestMethod(method)) return;
+    await this.captureApproval(run, method, params, id);
+  }
+
+  private async captureApproval(run: Run, method: string, params: unknown, protocolRequestId?: JsonRpcId): Promise<void> {
     try {
       await this.approvals.create({
         runId: run.id,
+        ...(protocolRequestId === undefined ? {} : { protocolRequestId, protocolMethod: method }),
         kind: inferApprovalKind(method, params),
         title: method,
         detail: stringifyApprovalDetail(params),
@@ -211,4 +222,31 @@ function inferApprovalKind(method: string, _params: unknown): ApprovalKind {
 
 function stringifyApprovalDetail(params: unknown): string {
   return (JSON.stringify(params, null, 2) ?? "").slice(0, 4000);
+}
+
+function approvalResponseFor(method: string, params: unknown, approved: boolean): unknown {
+  const normalized = method.toLowerCase();
+  if (normalized === "execcommandapproval" || normalized === "applypatchapproval") {
+    return { decision: approved ? "approved" : "denied" };
+  }
+  if (normalized.includes("commandexecution")) {
+    return { decision: approved ? "accept" : "decline" };
+  }
+  if (normalized.includes("filechange")) {
+    return { decision: approved ? "accept" : "decline" };
+  }
+  if (normalized.includes("permissions")) {
+    const requested = params as { permissions?: { network?: unknown; fileSystem?: unknown } };
+    return approved
+      ? {
+          permissions: {
+            ...(requested.permissions?.network ? { network: requested.permissions.network } : {}),
+            ...(requested.permissions?.fileSystem ? { fileSystem: requested.permissions.fileSystem } : {})
+          },
+          scope: "turn",
+          strictAutoReview: true
+        }
+      : { permissions: {}, scope: "turn", strictAutoReview: true };
+  }
+  return { decision: approved ? "accept" : "decline" };
 }
