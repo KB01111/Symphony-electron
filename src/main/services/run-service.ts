@@ -8,7 +8,7 @@ import { FileStateStore } from "./file-state.js";
 import { JsonlEventLog } from "./event-log.js";
 import { isoNow } from "./time.js";
 import { WorkspaceManager } from "./workspace-manager.js";
-import { CodexAppServerProcess } from "./codex-app-server.js";
+import { CodexAppServerProcess, type CodexAppServerProcessFactory, type CodexAppServerProcessLike } from "./codex-app-server.js";
 import { ApprovalService } from "./approval-service.js";
 import type { JsonRpcRequest } from "./codex-jsonrpc.js";
 
@@ -18,12 +18,13 @@ interface RunServiceOptions {
   approvals?: ApprovalService;
   onRunNeedsReview?(run: Run): Promise<void>;
   onLinearGraphql?(payload: { query: string; variables?: Record<string, unknown> }): Promise<unknown>;
+  createCodexProcess?: CodexAppServerProcessFactory;
 }
 
 export class RunService {
   private readonly store: FileStateStore<Run[]>;
-  private readonly active = new Map<string, CodexAppServerProcess>();
-  private readonly approvalWaiters = new Map<string, { kind: ApprovalRequest["kind"]; resolve(response: unknown): void }>();
+  private readonly active = new Map<string, CodexAppServerProcessLike>();
+  private readonly approvalWaiters = new Map<string, { runId: string; resolve(response: unknown): void }>();
 
   constructor(
     appDataRoot: string,
@@ -66,6 +67,7 @@ export class RunService {
       }
     }
     this.active.delete(runId);
+    await this.cleanupApprovalWaitersForRun(runId);
     const cancelled = await this.patch(runId, { state: "cancelled", completedAt: isoNow() });
     await this.eventLog.append(runId, { type: "run.cancelled", message: "Run cancelled by operator." });
     return cancelled;
@@ -84,11 +86,28 @@ export class RunService {
 
   async respondToApproval(requestId: string, approved: boolean): Promise<void> {
     const approvals = this.options.approvals;
-    const approval = approvals ? await approvals.resolve(requestId, approved) : undefined;
     const waiter = this.approvalWaiters.get(requestId);
-    if (!waiter) return;
-    this.approvalWaiters.delete(requestId);
-    waiter.resolve(approvalResponse(waiter.kind, approved));
+    let approval: ApprovalRequest | undefined;
+    if (approvals) {
+      try {
+        approval = await approvals.resolve(requestId, approved);
+      } catch (error) {
+        if (!waiter) {
+          throw error;
+        }
+      }
+    }
+    if (waiter) {
+      this.approvalWaiters.delete(requestId);
+      waiter.resolve(approval ? approvalResponseFor(approval, approved) : fallbackApprovalResponse(approved));
+    }
+    if (approval) {
+      await this.eventLog.append(approval.runId, {
+        type: "approval.responded",
+        message: approved ? "Approval granted by operator." : "Approval denied by operator.",
+        payload: approval
+      });
+    }
   }
 
   async getTranscript(runId: string): Promise<RunTranscriptItem[]> {
@@ -113,7 +132,8 @@ export class RunService {
       });
       await this.eventLog.append(run.id, { type: "run.running", message: `Workspace ready at ${workspace.path}.` });
 
-      const process = new CodexAppServerProcess({
+      const createCodexProcess = this.options.createCodexProcess ?? ((options) => new CodexAppServerProcess(options));
+      const process = createCodexProcess({
         codexHome: profile.codexHome,
         cwd: workspace.path,
         onStdout: (chunk) => void this.eventLog.append(run.id, { type: "codex.stdout", stream: "stdout", message: chunk }),
@@ -125,6 +145,12 @@ export class RunService {
           }
         },
         onServerRequest: (request) => this.handleServerRequest(run.id, request),
+        onProtocolError: (error, chunk) =>
+          void this.safeAppendEvent(run.id, {
+            type: "codex.protocol_error",
+            message: error.message,
+            payload: { chunk }
+          }),
         onExit: (exitCode, signal) => {
           this.active.delete(run.id);
           void this.handleExit(run.id, exitCode, signal);
@@ -144,6 +170,7 @@ export class RunService {
       });
     } catch (error) {
       this.active.delete(run.id);
+      await this.cleanupApprovalWaitersForRun(run.id);
       await this.patch(run.id, {
         state: "failed",
         completedAt: isoNow(),
@@ -157,6 +184,7 @@ export class RunService {
   private async handleExit(runId: string, exitCode: number | null, signal: NodeJS.Signals | null): Promise<void> {
     const run = await this.get(runId);
     if (run.state === "cancelled" || run.state === "done" || run.state === "failed" || run.state === "review") return;
+    await this.cleanupApprovalWaitersForRun(runId);
     const failed = exitCode !== 0;
     await this.patch(runId, {
       state: failed ? "failed" : "review",
@@ -186,6 +214,7 @@ export class RunService {
     await this.options.onRunNeedsReview?.(reviewed);
     const process = this.active.get(runId);
     this.active.delete(runId);
+    await this.cleanupApprovalWaitersForRun(runId);
     process?.close();
   }
 
@@ -212,11 +241,11 @@ export class RunService {
       return this.handleDynamicToolCall(request);
     }
 
-    if (request.method.includes("requestApproval") || request.method === "execCommandApproval" || request.method === "applyPatchApproval") {
+    if (isApprovalRequestMethod(request.method)) {
       const approval = await this.createApproval(runId, request);
       await this.eventLog.append(runId, { type: "run.approval.requested", message: approval.title, payload: approval });
       return new Promise((resolve) => {
-        this.approvalWaiters.set(approval.id, { kind: approval.kind, resolve });
+        this.approvalWaiters.set(approval.id, { runId, resolve });
       });
     }
 
@@ -252,23 +281,126 @@ export class RunService {
       throw new Error("Approval storage is not configured.");
     }
     const params = (request.params ?? {}) as Record<string, unknown>;
-    const kind = request.method.includes("fileChange") || request.method === "applyPatchApproval" ? "patch" : request.method.includes("tool") ? "tool" : "command";
+    const kind = inferApprovalKind(request.method, params);
     const command = typeof params.command === "string" ? params.command : Array.isArray(params.command) ? params.command.join(" ") : undefined;
-    const detail = command ?? (typeof params.reason === "string" ? params.reason : JSON.stringify(params));
+    const detail = command ?? (typeof params.reason === "string" ? params.reason : stringifyApprovalDetail(params));
     return approvals.create({
       runId,
       protocolRequestId: request.id,
+      protocolMethod: request.method,
       kind,
-      title: kind === "patch" ? "Approve file changes" : kind === "tool" ? "Approve tool request" : "Approve command",
+      title: approvalTitle(kind),
       detail,
       payload: request
     });
   }
+
+  private async safeAppendEvent(runId: string, input: Parameters<JsonlEventLog["append"]>[1]): Promise<void> {
+    try {
+      await this.eventLog.append(runId, input);
+    } catch {
+      // Protocol error capture must not break the running session.
+    }
+  }
+
+  private async cleanupApprovalWaitersForRun(runId: string): Promise<void> {
+    const approvals = this.options.approvals;
+    const pending = approvals ? (await approvals.listForRun(runId)).filter((approval) => approval.status === "pending") : [];
+    const pendingById = new Map(pending.map((approval) => [approval.id, approval]));
+    for (const [approvalId, waiter] of this.approvalWaiters) {
+      if (waiter.runId === runId) {
+        this.approvalWaiters.delete(approvalId);
+        const approval = pendingById.get(approvalId);
+        waiter.resolve(approval ? approvalResponseFor(approval, false) : fallbackApprovalResponse(false));
+      }
+    }
+    if (!approvals) return;
+    await Promise.all(
+      pending.map(async (approval) => {
+        try {
+          await approvals.resolve(approval.id, false);
+        } catch {
+          // Approval may already have been resolved by the operator.
+        }
+      })
+    );
+  }
 }
 
-function approvalResponse(kind: ApprovalRequest["kind"], approved: boolean): unknown {
-  if (kind === "tool") {
+export function isApprovalRequestMethod(method: string): boolean {
+  const normalized = method.toLowerCase();
+  return (
+    normalized === "requestapproval" ||
+    normalized === "request_approval" ||
+    normalized === "applypatchapproval" ||
+    normalized === "execcommandapproval" ||
+    normalized.endsWith("/requestapproval") ||
+    normalized.endsWith("/request_approval")
+  );
+}
+
+function inferApprovalKind(method: string, params: Record<string, unknown>): ApprovalRequest["kind"] {
+  const normalized = method.toLowerCase();
+  if (normalized.includes("command") || normalized === "execcommandapproval") return "command";
+  if (normalized.includes("file_change") || normalized.includes("filechange") || normalized.includes("patch")) return "patch";
+  if (normalized.includes("network")) return "network";
+  if (normalized.includes("permission")) {
+    const permissions = params.permissions as { network?: unknown; fileSystem?: unknown } | undefined;
+    if (permissions?.network) return "network";
+    if (permissions?.fileSystem) return "filesystem";
+  }
+  if (normalized.includes("tool")) return "tool";
+  return "unknown";
+}
+
+function approvalTitle(kind: ApprovalRequest["kind"]): string {
+  switch (kind) {
+    case "patch":
+      return "Approve file changes";
+    case "tool":
+      return "Approve tool request";
+    case "network":
+      return "Approve network access";
+    case "filesystem":
+      return "Approve filesystem access";
+    case "command":
+      return "Approve command";
+    default:
+      return "Approve Codex request";
+  }
+}
+
+function stringifyApprovalDetail(params: unknown): string {
+  return (JSON.stringify(params, null, 2) ?? "").slice(0, 4000);
+}
+
+export function approvalResponseFor(approval: ApprovalRequest, approved: boolean): unknown {
+  const request = approval.payload as Partial<JsonRpcRequest>;
+  const method = typeof request.method === "string" ? request.method : "";
+  const params = request.params;
+  const normalized = method.toLowerCase();
+  if (normalized === "execcommandapproval" || normalized === "applypatchapproval") {
+    return { decision: approved ? "approved" : "denied" };
+  }
+  if (normalized.includes("permission")) {
+    const requested = params as { permissions?: { network?: unknown; fileSystem?: unknown } };
+    return approved
+      ? {
+          permissions: {
+            ...(requested.permissions?.network ? { network: requested.permissions.network } : {}),
+            ...(requested.permissions?.fileSystem ? { fileSystem: requested.permissions.fileSystem } : {})
+          },
+          scope: "turn",
+          strictAutoReview: true
+        }
+      : { permissions: {}, scope: "turn", strictAutoReview: true };
+  }
+  if (approval.kind === "tool") {
     return { answers: {} };
   }
+  return { decision: approved ? "accept" : "decline" };
+}
+
+function fallbackApprovalResponse(approved: boolean): unknown {
   return { decision: approved ? "accept" : "decline" };
 }

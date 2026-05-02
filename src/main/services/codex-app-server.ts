@@ -14,8 +14,17 @@ export interface CodexAppServerOptions {
   onStderr?(chunk: string): void;
   onNotification?(method: string, params: unknown): void;
   onServerRequest?(request: JsonRpcRequest): Promise<unknown> | unknown;
+  onProtocolError?(error: Error, chunk: string): void;
   onExit?(exitCode: number | null, signal: NodeJS.Signals | null): void;
   dynamicTools?: DynamicToolSpec[];
+}
+
+export type CodexAppServerProcessFactory = (options: CodexAppServerOptions) => CodexAppServerProcessLike;
+
+export interface CodexAppServerProcessLike {
+  readonly pid: number | undefined;
+  startTurn(prompt: string, cwd: string): Promise<StartedTurn>;
+  close(): void;
 }
 
 export interface StartedTurn {
@@ -23,7 +32,7 @@ export interface StartedTurn {
   turnId: string;
 }
 
-export class CodexAppServerProcess {
+export class CodexAppServerProcess implements CodexAppServerProcessLike {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly client: CodexJsonRpcClient;
   private readonly dynamicTools: DynamicToolSpec[];
@@ -50,7 +59,12 @@ export class CodexAppServerProcess {
     this.child.stdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       options.onStdout?.(text);
-      this.client.acceptChunk(text);
+      try {
+        this.client.acceptChunk(text);
+      } catch (error) {
+        options.onProtocolError?.(error as Error, text);
+        this.close();
+      }
     });
     this.child.stderr.on("data", (chunk: Buffer) => options.onStderr?.(chunk.toString("utf8")));
     this.child.on("exit", (exitCode, signal) => options.onExit?.(exitCode, signal));
@@ -99,7 +113,6 @@ export class CodexAppServerProcess {
   close(): void {
     this.client.close();
   }
-
 }
 
 function defaultDynamicTools(): DynamicToolSpec[] {
@@ -120,4 +133,3 @@ function defaultDynamicTools(): DynamicToolSpec[] {
     }
   ];
 }
-

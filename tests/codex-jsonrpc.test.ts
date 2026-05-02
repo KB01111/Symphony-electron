@@ -34,3 +34,69 @@ test("client resolves matching responses and emits notifications", async () => {
   expect(notifications).toEqual([{ method: "turn/started", params: { turnId: "turn-1" } }]);
 });
 
+test("client emits server requests separately from notifications and responses", () => {
+  const transport = {
+    write: vi.fn(),
+    close: vi.fn()
+  };
+  const client = new CodexJsonRpcClient(transport);
+  const notifications: unknown[] = [];
+  const requests: unknown[] = [];
+
+  client.onNotification((message) => notifications.push(message));
+  client.onRequest((message) => requests.push(message));
+
+  client.acceptLine('{"id":"approval-1","method":"item/commandExecution/requestApproval","params":{"command":"npm test"}}');
+
+  expect(requests).toEqual([
+    {
+      id: "approval-1",
+      method: "item/commandExecution/requestApproval",
+      params: { command: "npm test" }
+    }
+  ]);
+  expect(notifications).toEqual([]);
+});
+
+test("client writes JSON-RPC responses for server requests", () => {
+  const written: string[] = [];
+  const transport = {
+    write: vi.fn((line: string) => {
+      written.push(line);
+    }),
+    close: vi.fn()
+  };
+  const client = new CodexJsonRpcClient(transport);
+
+  client.respond("approval-1", { decision: "accept" });
+  client.respondError("approval-2", -32000, "denied", { reason: "operator" });
+
+  expect(written.map((line) => JSON.parse(line))).toEqual([
+    { id: "approval-1", result: { decision: "accept" } },
+    { id: "approval-2", error: { code: -32000, message: "denied", data: { reason: "operator" } } }
+  ]);
+});
+
+test("client serializes undefined response results as null", () => {
+  const transport = {
+    write: vi.fn(),
+    close: vi.fn()
+  };
+  const client = new CodexJsonRpcClient(transport);
+
+  client.respond("approval-1", undefined);
+
+  expect(transport.write).toHaveBeenCalledTimes(1);
+  const [line] = transport.write.mock.calls[0] ?? [];
+  expect(JSON.parse(String(line))).toEqual({ id: "approval-1", result: null });
+});
+
+test("client reports malformed JSON-RPC input to caller", () => {
+  const transport = {
+    write: vi.fn(),
+    close: vi.fn()
+  };
+  const client = new CodexJsonRpcClient(transport);
+
+  expect(() => client.acceptLine("{not json")).toThrow();
+});

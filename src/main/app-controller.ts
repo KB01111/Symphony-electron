@@ -1,10 +1,23 @@
 import path from "node:path";
-import type { CodexAccountStatus, HealthCheckResult, LinearConfig, Run, SchedulerSnapshot, Task, WorkflowSnapshot, WorkflowValidation } from "../shared/types.js";
+import type {
+  CodexAccountStatus,
+  HealthCheckResult,
+  LinearConfig,
+  OrchestratorState,
+  Profile,
+  Run,
+  SchedulerSnapshot,
+  Task,
+  WorkflowSnapshot,
+  WorkflowValidation
+} from "../shared/types.js";
 import { ApprovalService } from "./services/approval-service.js";
 import { JsonlEventLog } from "./services/event-log.js";
 import { LinearClient } from "./services/linear-client.js";
 import { LinearConfigService } from "./services/linear-config-service.js";
 import { OrchestrationService } from "./services/orchestration-service.js";
+import { OrchestratorService } from "./services/orchestrator-service.js";
+import { OrchestratorStateStore } from "./services/orchestrator-state.js";
 import { ProfileService } from "./services/profiles.js";
 import { RunService } from "./services/run-service.js";
 import { TaskService } from "./services/task-service.js";
@@ -22,6 +35,9 @@ export class AppController {
   readonly approvals: ApprovalService;
   readonly workflow: WorkflowService;
   readonly scheduler: OrchestrationService;
+  readonly orchestratorState: OrchestratorStateStore;
+  readonly orchestrator: OrchestratorService;
+  private schedulerDisabled = false;
 
   constructor(readonly appDataRoot: string) {
     this.profiles = new ProfileService({ appDataRoot });
@@ -47,10 +63,36 @@ export class AppController {
       listRuns: () => this.runs.list(),
       startRun: (task, profile) => this.startRun(task.id, profile.id)
     });
+    this.orchestratorState = new OrchestratorStateStore(appDataRoot);
+    this.orchestrator = new OrchestratorService({
+      readState: () => this.orchestratorState.read(),
+      writeState: (state) => this.orchestratorState.write(state),
+      listCandidateTasks: () => this.refreshLinearCandidates(),
+      listRuns: () => this.runs.list(),
+      startRun: async (task) => {
+        const profile = await this.selectHealthyProfile();
+        if (!profile) {
+          throw new Error("No healthy Codex profile configured.");
+        }
+        return this.runs.start(task, profile);
+      },
+      appendEvent: (runId, event) => this.eventLog.append(runId, event)
+    });
   }
 
   async saveLinearConfig(config: LinearConfig): Promise<LinearConfig> {
     return this.linearConfig.save(config);
+  }
+
+  private async selectHealthyProfile(): Promise<Profile | undefined> {
+    const profiles = await this.profiles.list();
+    for (const profile of profiles) {
+      const health = await this.profiles.checkHealth(profile.id);
+      if (health.ok) {
+        return profile;
+      }
+    }
+    return undefined;
   }
 
   async testLinearConnection(config?: LinearConfig): Promise<HealthCheckResult> {
@@ -70,6 +112,12 @@ export class AppController {
   async syncLinear(): Promise<Task[]> {
     const issues = await this.listLinearIssues();
     return this.tasks.upsertMany(issues);
+  }
+
+  private async refreshLinearCandidates(): Promise<Task[]> {
+    const issues = await this.listLinearIssues();
+    await this.tasks.upsertMany(issues);
+    return issues;
   }
 
   async transitionLinearIssue(issueId: string, stateName: string): Promise<void> {
@@ -145,6 +193,9 @@ export class AppController {
   }
 
   startScheduler(): Promise<SchedulerSnapshot> {
+    if (this.schedulerDisabled) {
+      return Promise.resolve(this.scheduler.stop());
+    }
     return this.scheduler.start();
   }
 
@@ -158,6 +209,24 @@ export class AppController {
 
   schedulerSnapshot(): SchedulerSnapshot {
     return this.scheduler.snapshot();
+  }
+
+  async startOrchestrator(): Promise<OrchestratorState> {
+    this.schedulerDisabled = true;
+    this.scheduler.stop();
+    return this.orchestrator.start();
+  }
+
+  async pauseOrchestrator(): Promise<OrchestratorState> {
+    const state = await this.orchestrator.pause();
+    this.schedulerDisabled = false;
+    return state;
+  }
+
+  async resumeOrchestrator(): Promise<OrchestratorState> {
+    this.schedulerDisabled = true;
+    this.scheduler.stop();
+    return this.orchestrator.resume();
   }
 
   private async markRunReadyForReview(run: Run): Promise<void> {
@@ -179,4 +248,3 @@ export class AppController {
     }
   }
 }
-

@@ -45,7 +45,16 @@ const api: SymphonyApi = {
     getEvents: (runId: string) => invoke("runs:getEvents", runId),
     getTranscript: (runId: string) => invoke("runs:getTranscript", runId),
     listApprovals: (runId?: string) => invoke("runs:listApprovals", runId),
+    listPendingApprovals: () => invoke("runs:listPendingApprovals"),
     respondToApproval: (requestId: string, approved: boolean) => invoke("runs:respondToApproval", requestId, approved)
+  },
+  orchestrator: {
+    snapshot: () => invoke("orchestrator:snapshot"),
+    start: () => invoke("orchestrator:start"),
+    pause: () => invoke("orchestrator:pause"),
+    resume: () => invoke("orchestrator:resume"),
+    tick: () => invoke("orchestrator:tick"),
+    updatePolicy: (policy) => invoke("orchestrator:updatePolicy", policy)
   },
   logs: {
     tail: (runId: string) => invoke("logs:tail", runId),
@@ -74,4 +83,3 @@ const api: SymphonyApi = {
 };
 
 contextBridge.exposeInMainWorld("symphony", api);
-

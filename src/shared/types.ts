@@ -4,6 +4,8 @@ export type RunState = "queued" | "preparing" | "running" | "stalled" | "failed"
 
 export type ApprovalStatus = "pending" | "approved" | "denied";
 
+export type ApprovalKind = "command" | "patch" | "tool" | "network" | "filesystem" | "handoff" | "merge" | "unknown";
+
 export interface Profile {
   id: string;
   name: string;
@@ -110,11 +112,57 @@ export interface RunTranscriptItem {
   text: string;
 }
 
+export type OrchestratorMode = "manual" | "autonomous";
+
+export interface AutomationPolicy {
+  autoStart: boolean;
+  autoCreateHandoff: boolean;
+  autoWriteTrackerUpdates: boolean;
+  maxConcurrentRuns: number;
+  pollIntervalSeconds: number;
+  stallTimeoutSeconds: number;
+  maxRetryBackoffSeconds: number;
+  terminalStateNames: string[];
+  requireApprovalFor: Array<Exclude<ApprovalKind, "tool" | "unknown">>;
+}
+
+export interface RetryQueueEntry {
+  taskId: string;
+  attempts: number;
+  nextAttemptAt: string;
+  lastError: string;
+}
+
+export interface ActiveRunClaim {
+  taskId: string;
+  runId: string;
+  identifier: string;
+  startedAt: string;
+  lastEventAt?: string;
+}
+
+export interface OrchestratorState {
+  mode: OrchestratorMode;
+  paused: boolean;
+  policy: AutomationPolicy;
+  activeClaims: ActiveRunClaim[];
+  retryQueue: RetryQueueEntry[];
+  lastTickAt?: string;
+  lastError?: string;
+}
+
+export interface OrchestratorSnapshot {
+  state: OrchestratorState;
+  queuedTaskIds: string[];
+  activeRuns: RunReference[];
+}
+
 export interface ApprovalRequest {
   id: string;
   runId: string;
   protocolRequestId?: string | number;
-  kind: "command" | "patch" | "tool" | "unknown";
+  protocolMethod?: string;
+  kind: ApprovalKind;
   title: string;
   detail: string;
   payload: unknown;
@@ -221,7 +269,16 @@ export interface SymphonyApi {
     getEvents(runId: string): Promise<RunEvent[]>;
     getTranscript(runId: string): Promise<RunTranscriptItem[]>;
     listApprovals(runId?: string): Promise<ApprovalRequest[]>;
+    listPendingApprovals(): Promise<ApprovalRequest[]>;
     respondToApproval(requestId: string, approved: boolean): Promise<void>;
+  };
+  orchestrator: {
+    snapshot(): Promise<OrchestratorSnapshot>;
+    start(): Promise<OrchestratorState>;
+    pause(): Promise<OrchestratorState>;
+    resume(): Promise<OrchestratorState>;
+    tick(): Promise<OrchestratorSnapshot>;
+    updatePolicy(policy: Partial<AutomationPolicy>): Promise<OrchestratorState>;
   };
   logs: {
     tail(runId: string): Promise<RunEvent[]>;

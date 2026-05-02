@@ -1,6 +1,6 @@
 import { BrowserWindow, ipcMain } from "electron";
 import type { AppController } from "./app-controller.js";
-import type { LinearConfig, Task } from "../shared/types.js";
+import type { AutomationPolicy, LinearConfig, Task } from "../shared/types.js";
 import { eventToTranscriptItem } from "../shared/transcript.js";
 
 export function registerIpc(controller: AppController): void {
@@ -50,11 +50,18 @@ export function registerIpc(controller: AppController): void {
   ipcMain.handle("runs:getEvents", (_event, runId: string) => controller.eventLog.replay(runId));
   ipcMain.handle("runs:getTranscript", (_event, runId: string) => controller.runs.getTranscript(runId));
   ipcMain.handle("runs:listApprovals", (_event, runId?: string) => controller.runs.listApprovals(runId));
+  ipcMain.handle("runs:listPendingApprovals", () => controller.approvals.listPending());
   ipcMain.handle("runs:respondToApproval", (_event, requestId: string, approved: boolean) => controller.runs.respondToApproval(requestId, approved));
+
+  ipcMain.handle("orchestrator:snapshot", () => controller.orchestrator.snapshot());
+  ipcMain.handle("orchestrator:start", () => controller.startOrchestrator());
+  ipcMain.handle("orchestrator:pause", () => controller.pauseOrchestrator());
+  ipcMain.handle("orchestrator:resume", () => controller.resumeOrchestrator());
+  ipcMain.handle("orchestrator:tick", () => controller.orchestrator.tick());
+  ipcMain.handle("orchestrator:updatePolicy", (_event, policy: Partial<AutomationPolicy>) => controller.orchestrator.updatePolicy(policy));
 
   ipcMain.handle("logs:tail", (_event, runId: string) => controller.eventLog.replay(runId));
   ipcMain.handle("logs:export", (_event, runId: string) => controller.eventLog.exportPath(runId));
 
   ipcMain.handle("health:checkAll", () => controller.checkAllHealth());
 }
-
