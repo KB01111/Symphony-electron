@@ -462,6 +462,8 @@ export class OrchestratorService {
 
     for (const candidate of candidates) {
       if (activeTaskIds.has(candidate.id)) continue;
+      const retry = state.retryQueue.find((r) => r.taskId === candidate.id);
+      if (retry && new Date(retry.nextAttemptAt) > this.now()) continue;
       if (nextState.activeClaims.length >= state.policy.maxConcurrentRuns) {
         queuedTaskIds.push(candidate.id);
         continue;
