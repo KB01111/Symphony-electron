@@ -8,7 +8,7 @@ import { FileStateStore } from "./file-state.js";
 import { JsonlEventLog } from "./event-log.js";
 import { isoNow } from "./time.js";
 import { WorkspaceManager } from "./workspace-manager.js";
-import { CodexAppServerProcess } from "./codex-app-server.js";
+import { CodexAppServerProcess, type CodexAppServerProcessFactory, type CodexAppServerProcessLike } from "./codex-app-server.js";
 import { ApprovalService } from "./approval-service.js";
 import type { JsonRpcRequest } from "./codex-jsonrpc.js";
 
@@ -18,12 +18,13 @@ interface RunServiceOptions {
   approvals?: ApprovalService;
   onRunNeedsReview?(run: Run): Promise<void>;
   onLinearGraphql?(payload: { query: string; variables?: Record<string, unknown> }): Promise<unknown>;
+  createCodexProcess?: CodexAppServerProcessFactory;
 }
 
 export class RunService {
   private readonly store: FileStateStore<Run[]>;
-  private readonly active = new Map<string, CodexAppServerProcess>();
-  private readonly approvalWaiters = new Map<string, { resolve(response: unknown): void }>();
+  private readonly active = new Map<string, CodexAppServerProcessLike>();
+  private readonly approvalWaiters = new Map<string, { runId: string; resolve(response: unknown): void }>();
 
   constructor(
     appDataRoot: string,
@@ -66,6 +67,7 @@ export class RunService {
       }
     }
     this.active.delete(runId);
+    await this.cleanupApprovalWaitersForRun(runId);
     const cancelled = await this.patch(runId, { state: "cancelled", completedAt: isoNow() });
     await this.eventLog.append(runId, { type: "run.cancelled", message: "Run cancelled by operator." });
     return cancelled;
@@ -84,8 +86,17 @@ export class RunService {
 
   async respondToApproval(requestId: string, approved: boolean): Promise<void> {
     const approvals = this.options.approvals;
-    const approval = approvals ? await approvals.resolve(requestId, approved) : undefined;
     const waiter = this.approvalWaiters.get(requestId);
+    let approval: ApprovalRequest | undefined;
+    if (approvals) {
+      try {
+        approval = await approvals.resolve(requestId, approved);
+      } catch (error) {
+        if (!waiter) {
+          throw error;
+        }
+      }
+    }
     if (waiter) {
       this.approvalWaiters.delete(requestId);
       waiter.resolve(approval ? approvalResponseFor(approval, approved) : fallbackApprovalResponse(approved));
@@ -121,7 +132,8 @@ export class RunService {
       });
       await this.eventLog.append(run.id, { type: "run.running", message: `Workspace ready at ${workspace.path}.` });
 
-      const process = new CodexAppServerProcess({
+      const createCodexProcess = this.options.createCodexProcess ?? ((options) => new CodexAppServerProcess(options));
+      const process = createCodexProcess({
         codexHome: profile.codexHome,
         cwd: workspace.path,
         onStdout: (chunk) => void this.eventLog.append(run.id, { type: "codex.stdout", stream: "stdout", message: chunk }),
@@ -158,6 +170,7 @@ export class RunService {
       });
     } catch (error) {
       this.active.delete(run.id);
+      await this.cleanupApprovalWaitersForRun(run.id);
       await this.patch(run.id, {
         state: "failed",
         completedAt: isoNow(),
@@ -171,6 +184,7 @@ export class RunService {
   private async handleExit(runId: string, exitCode: number | null, signal: NodeJS.Signals | null): Promise<void> {
     const run = await this.get(runId);
     if (run.state === "cancelled" || run.state === "done" || run.state === "failed" || run.state === "review") return;
+    await this.cleanupApprovalWaitersForRun(runId);
     const failed = exitCode !== 0;
     await this.patch(runId, {
       state: failed ? "failed" : "review",
@@ -200,6 +214,7 @@ export class RunService {
     await this.options.onRunNeedsReview?.(reviewed);
     const process = this.active.get(runId);
     this.active.delete(runId);
+    await this.cleanupApprovalWaitersForRun(runId);
     process?.close();
   }
 
@@ -230,7 +245,7 @@ export class RunService {
       const approval = await this.createApproval(runId, request);
       await this.eventLog.append(runId, { type: "run.approval.requested", message: approval.title, payload: approval });
       return new Promise((resolve) => {
-        this.approvalWaiters.set(approval.id, { resolve });
+        this.approvalWaiters.set(approval.id, { runId, resolve });
       });
     }
 
@@ -286,6 +301,27 @@ export class RunService {
     } catch {
       // Protocol error capture must not break the running session.
     }
+  }
+
+  private async cleanupApprovalWaitersForRun(runId: string): Promise<void> {
+    for (const [approvalId, waiter] of this.approvalWaiters) {
+      if (waiter.runId === runId) {
+        this.approvalWaiters.delete(approvalId);
+        waiter.resolve(fallbackApprovalResponse(false));
+      }
+    }
+    const approvals = this.options.approvals;
+    if (!approvals) return;
+    const pending = (await approvals.listForRun(runId)).filter((approval) => approval.status === "pending");
+    await Promise.all(
+      pending.map(async (approval) => {
+        try {
+          await approvals.resolve(approval.id, false);
+        } catch {
+          // Approval may already have been resolved by the operator.
+        }
+      })
+    );
   }
 }
 

@@ -19,12 +19,20 @@ export interface CodexAppServerOptions {
   dynamicTools?: DynamicToolSpec[];
 }
 
+export type CodexAppServerProcessFactory = (options: CodexAppServerOptions) => CodexAppServerProcessLike;
+
+export interface CodexAppServerProcessLike {
+  readonly pid: number | undefined;
+  startTurn(prompt: string, cwd: string): Promise<StartedTurn>;
+  close(): void;
+}
+
 export interface StartedTurn {
   threadId: string;
   turnId: string;
 }
 
-export class CodexAppServerProcess {
+export class CodexAppServerProcess implements CodexAppServerProcessLike {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly client: CodexJsonRpcClient;
   private readonly dynamicTools: DynamicToolSpec[];
@@ -55,6 +63,7 @@ export class CodexAppServerProcess {
         this.client.acceptChunk(text);
       } catch (error) {
         options.onProtocolError?.(error as Error, text);
+        this.close();
       }
     });
     this.child.stderr.on("data", (chunk: Buffer) => options.onStderr?.(chunk.toString("utf8")));

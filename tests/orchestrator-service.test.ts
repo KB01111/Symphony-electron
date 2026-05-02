@@ -131,7 +131,7 @@ test("stalled runs consume concurrency and keep active claims", async () => {
   expect(snapshot.state.activeClaims).toEqual(state.activeClaims);
 });
 
-test("scheduled tick failure recording swallows state persistence errors", async () => {
+test("scheduled tick failure recording retries when state persistence fails", async () => {
   vi.useFakeTimers();
   try {
     let writes = 0;
@@ -157,7 +157,7 @@ test("scheduled tick failure recording swallows state persistence errors", async
     await service.start();
     await vi.advanceTimersByTimeAsync(1000);
 
-    expect(vi.getTimerCount()).toBe(0);
+    expect(vi.getTimerCount()).toBe(1);
   } finally {
     vi.useRealTimers();
   }
@@ -440,6 +440,38 @@ test("queued pause prevents a finishing scheduled tick from scheduling another t
     await pause;
 
     expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("stop prevents a finishing scheduled tick from scheduling another timer", async () => {
+  vi.useFakeTimers();
+  try {
+    let state: OrchestratorState = { ...defaultOrchestratorState(), policy: { ...defaultOrchestratorState().policy, pollIntervalSeconds: 1 } };
+    let releaseStartRun: (() => void) | undefined;
+    const service = new OrchestratorService({
+      readState: async () => state,
+      writeState: async (next) => {
+        state = next;
+      },
+      listCandidateTasks: async () => [task("a")],
+      listRuns: async () => [],
+      startRun: async (candidate) =>
+        new Promise<Run>((resolve) => {
+          releaseStartRun = () => resolve(run(`run-${candidate.id}`, candidate.id));
+        }),
+      appendEvent: async () => undefined,
+      now: () => new Date("2026-05-02T10:00:00.000Z")
+    });
+
+    await service.start();
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.waitFor(() => expect(releaseStartRun).toBeDefined());
+
+    service.stop();
+    releaseStartRun?.();
+    await vi.waitFor(() => expect(vi.getTimerCount()).toBe(0));
   } finally {
     vi.useRealTimers();
   }

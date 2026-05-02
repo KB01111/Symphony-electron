@@ -12,6 +12,7 @@ type OrchestratorDependencies = {
 };
 
 const ACTIVE_RUN_STATES = new Set<Run["state"]>(["preparing", "running", "stalled"]);
+const RECOVERY_POLL_INTERVAL_SECONDS = 30;
 
 export class OrchestratorService {
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -72,6 +73,7 @@ export class OrchestratorService {
   }
 
   stop(): void {
+    this.pauseRequested = true;
     this.clearTimer();
   }
 
@@ -209,8 +211,15 @@ export class OrchestratorService {
     } catch {
       current = undefined;
     }
-    if (!this.pauseRequested && current && !current.paused && current.policy.autoStart) {
-      this.schedule(current.policy.pollIntervalSeconds);
+    if (this.pauseRequested) {
+      return;
+    }
+    if (current) {
+      if (!current.paused && current.policy.autoStart) {
+        this.schedule(current.policy.pollIntervalSeconds);
+      }
+    } else {
+      this.schedule(RECOVERY_POLL_INTERVAL_SECONDS);
     }
   }
 }
