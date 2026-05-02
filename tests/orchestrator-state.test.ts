@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
-import { defaultOrchestratorState, OrchestratorStateStore } from "../src/main/services/orchestrator-state.js";
+import { defaultAutomationPolicy, defaultOrchestratorState, OrchestratorStateStore } from "../src/main/services/orchestrator-state.js";
 
 const tempDirs: string[] = [];
 
@@ -125,4 +125,65 @@ test("clones policy arrays for defaults and backfilled reads", async () => {
   const laterState = await store.read();
   expect(laterState.policy.terminalStateNames).toEqual(["Done", "Canceled", "Cancelled", "Duplicate"]);
   expect(laterState.policy.requireApprovalFor).toEqual(["merge"]);
+});
+
+test("defaultAutomationPolicy includes maxConcurrentRunsByState as empty object", () => {
+  expect(defaultAutomationPolicy).toHaveProperty("maxConcurrentRunsByState");
+  expect(defaultAutomationPolicy.maxConcurrentRunsByState).toEqual({});
+});
+
+test("defaultOrchestratorState includes maxConcurrentRunsByState as empty object", () => {
+  const state = defaultOrchestratorState();
+  expect(state.policy.maxConcurrentRunsByState).toEqual({});
+});
+
+test("cloneAutomationPolicy does not share maxConcurrentRunsByState reference", () => {
+  const a = defaultOrchestratorState();
+  const b = defaultOrchestratorState();
+
+  (a.policy.maxConcurrentRunsByState as Record<string, number>)["in_progress"] = 3;
+  expect(b.policy.maxConcurrentRunsByState).not.toHaveProperty("in_progress");
+});
+
+test("store read backfills maxConcurrentRunsByState default when missing from persisted state", async () => {
+  const root = await tempRoot();
+  const stateDir = path.join(root, "state");
+  await mkdir(stateDir, { recursive: true });
+  await writeFile(
+    path.join(stateDir, "orchestrator.json"),
+    JSON.stringify({
+      mode: "autonomous",
+      paused: false,
+      policy: {
+        autoStart: true,
+        maxConcurrentRuns: 1
+        // intentionally omits maxConcurrentRunsByState
+      }
+    }),
+    "utf8"
+  );
+
+  const store = new OrchestratorStateStore(root);
+  const state = await store.read();
+
+  expect(state.policy.maxConcurrentRunsByState).toEqual({});
+});
+
+test("clones maxConcurrentRunsByState from stored state so mutations do not corrupt future reads", async () => {
+  const root = await tempRoot();
+  const store = new OrchestratorStateStore(root);
+
+  await store.update((state) => ({
+    ...state,
+    policy: {
+      ...state.policy,
+      maxConcurrentRunsByState: { ready: 2 }
+    }
+  }));
+
+  const first = await store.read();
+  (first.policy.maxConcurrentRunsByState as Record<string, number>)["ready"] = 99;
+
+  const second = await store.read();
+  expect(second.policy.maxConcurrentRunsByState["ready"]).toBe(2);
 });

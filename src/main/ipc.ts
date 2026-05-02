@@ -3,6 +3,15 @@ import type { AppController } from "./app-controller.js";
 import type { AutomationPolicy, LinearConfig, Task } from "../shared/types.js";
 import { eventToTranscriptItem } from "../shared/transcript.js";
 
+/**
+ * Wires Electron IPC channels to controller methods and broadcasts appended event-log entries to all renderer windows.
+ *
+ * Registers a set of named ipcMain handlers (profiles, linear, workflow, scheduler, tasks, runs, orchestrator, proof, handoff, logs, health, etc.)
+ * that delegate to the provided AppController, and forwards each event appended to the controller's eventLog to every open BrowserWindow
+ * as both the original run event and a converted transcript item.
+ *
+ * @param controller - The application controller whose methods are bound to IPC channels and whose eventLog is broadcast to renderers
+ */
 export function registerIpc(controller: AppController): void {
   controller.eventLog.onAppend((event) => {
     const transcriptItem = eventToTranscriptItem(event);
@@ -11,12 +20,6 @@ export function registerIpc(controller: AppController): void {
       window.webContents.send("events:transcriptItem", transcriptItem);
     }
   });
-  controller.scheduler.onSnapshot((snapshot) => {
-    for (const window of BrowserWindow.getAllWindows()) {
-      window.webContents.send("events:scheduler", snapshot);
-    }
-  });
-
   ipcMain.handle("profiles:list", () => controller.profiles.list());
   ipcMain.handle("profiles:create", (_event, input: { name: string }) => controller.profiles.create(input));
   ipcMain.handle("profiles:startLogin", (_event, profileId: string) => controller.profiles.startLogin(profileId));
@@ -59,6 +62,9 @@ export function registerIpc(controller: AppController): void {
   ipcMain.handle("orchestrator:resume", () => controller.resumeOrchestrator());
   ipcMain.handle("orchestrator:tick", () => controller.orchestrator.tick());
   ipcMain.handle("orchestrator:updatePolicy", (_event, policy: Partial<AutomationPolicy>) => controller.orchestrator.updatePolicy(policy));
+
+  ipcMain.handle("proof:list", (_event, runId: string) => controller.proof.list(runId));
+  ipcMain.handle("handoff:build", (_event, runId: string) => controller.buildHandoff(runId));
 
   ipcMain.handle("logs:tail", (_event, runId: string) => controller.eventLog.replay(runId));
   ipcMain.handle("logs:export", (_event, runId: string) => controller.eventLog.exportPath(runId));

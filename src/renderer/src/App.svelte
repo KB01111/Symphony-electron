@@ -1,36 +1,35 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { layout, prepare } from "@chenglou/pretext";
-  import {
-    Activity,
-    Archive,
-    Bot,
-    CheckCircle2,
-    CircleAlert,
-    Clock3,
-    ExternalLink,
-    GitBranch,
-    KeyRound,
-    MessageSquareText,
-    Play,
-    RefreshCw,
-    ShieldCheck,
-    Square,
-    Terminal,
-    UserPlus,
-    Workflow,
-    XCircle
-  } from "lucide-svelte";
+  import Activity from "lucide-svelte/icons/activity";
+  import Archive from "lucide-svelte/icons/archive";
+  import Bot from "lucide-svelte/icons/bot";
+  import CheckCircle2 from "lucide-svelte/icons/check-circle-2";
+  import CircleAlert from "lucide-svelte/icons/circle-alert";
+  import Clock3 from "lucide-svelte/icons/clock-3";
+  import ExternalLink from "lucide-svelte/icons/external-link";
+  import GitBranch from "lucide-svelte/icons/git-branch";
+  import KeyRound from "lucide-svelte/icons/key-round";
+  import MessageSquareText from "lucide-svelte/icons/message-square-text";
+  import Play from "lucide-svelte/icons/play";
+  import RefreshCw from "lucide-svelte/icons/refresh-cw";
+  import ShieldCheck from "lucide-svelte/icons/shield-check";
+  import Square from "lucide-svelte/icons/square";
+  import Terminal from "lucide-svelte/icons/terminal";
+  import UserPlus from "lucide-svelte/icons/user-plus";
+  import Workflow from "lucide-svelte/icons/workflow";
   import type {
     ApprovalRequest,
     CodexAccountStatus,
+    HandoffDraft,
     HealthCheckResult,
     LinearConfig,
+    OrchestratorSnapshot,
     Profile,
+    ProofEntry,
     Run,
     RunEvent,
     RunTranscriptItem,
-    SchedulerSnapshot,
     Task,
     WorkflowSnapshot
   } from "../../shared/types";
@@ -42,6 +41,7 @@
   const api = window.symphony;
   const transcriptFont = '12px "Cascadia Mono", "Consolas", monospace';
   const transcriptMetricsCache = new Map<string, string>();
+  const runDetailTabs = ["transcript", "events", "approvals", "proof", "workspace", "handoff"] as const;
 
   let profiles: Profile[] = [];
   let tasks: Task[] = [];
@@ -50,7 +50,10 @@
   let approvals: ApprovalRequest[] = [];
   let accountStatuses: Record<string, CodexAccountStatus> = {};
   let workflow: WorkflowSnapshot | null = null;
-  let scheduler: SchedulerSnapshot = { enabled: false, running: [], queuedTaskIds: [], retryQueue: [] };
+  let orchestrator: OrchestratorSnapshot | null = null;
+  let proof: ProofEntry[] = [];
+  let handoff: HandoffDraft | null = null;
+  let runDetailTab: "transcript" | "events" | "approvals" | "proof" | "workspace" | "handoff" = "transcript";
   let selectedProfileId = "";
   let selectedTaskId = "";
   let selectedRunId = "";
@@ -80,7 +83,6 @@
 
   let cleanupRunEvents: (() => void) | undefined;
   let cleanupTranscriptEvents: (() => void) | undefined;
-  let cleanupSchedulerEvents: (() => void) | undefined;
 
   onMount(() => {
     cleanupRunEvents = api.events.onRunEvent((event) => {
@@ -94,28 +96,24 @@
         transcript = [...transcript, item];
       }
     });
-    cleanupSchedulerEvents = api.events.onScheduler((snapshot) => {
-      scheduler = snapshot;
-    });
     void refresh();
   });
 
   onDestroy(() => {
     cleanupRunEvents?.();
     cleanupTranscriptEvents?.();
-    cleanupSchedulerEvents?.();
   });
 
   async function refresh(): Promise<void> {
     busy = true;
     try {
-      const [nextProfiles, nextTasks, nextRuns, nextHealth, nextWorkflow, nextScheduler, nextLinearConfig] = await Promise.all([
+      const [nextProfiles, nextTasks, nextRuns, nextHealth, nextWorkflow, nextOrchestrator, nextLinearConfig] = await Promise.all([
         api.profiles.list(),
         api.tasks.list(),
         api.runs.list(),
         api.health.checkAll(),
         api.workflow.snapshot(),
-        api.scheduler.snapshot(),
+        api.orchestrator.snapshot(),
         api.linear.getConfig()
       ]);
       profiles = nextProfiles;
@@ -123,7 +121,7 @@
       runs = nextRuns;
       health = nextHealth;
       workflow = nextWorkflow;
-      scheduler = nextScheduler;
+      orchestrator = nextOrchestrator;
       linearConfig = nextLinearConfig;
       if (!selectedProfileId && profiles[0]) selectedProfileId = profiles[0].id;
       if (!selectedTaskId && tasks[0]) selectedTaskId = tasks[0].id;
@@ -139,10 +137,10 @@
   }
 
   async function refreshLight(): Promise<void> {
-    const [nextTasks, nextRuns, nextScheduler] = await Promise.all([api.tasks.list(), api.runs.list(), api.scheduler.snapshot()]);
+    const [nextTasks, nextRuns, nextOrchestrator] = await Promise.all([api.tasks.list(), api.runs.list(), api.orchestrator.snapshot()]);
     tasks = nextTasks;
     runs = nextRuns;
-    scheduler = nextScheduler;
+    orchestrator = nextOrchestrator;
   }
 
   async function refreshRunDetails(run: Run | undefined = selectedRun): Promise<void> {
@@ -150,17 +148,21 @@
       events = [];
       transcript = [];
       approvals = await api.runs.listApprovals();
+      proof = [];
+      handoff = null;
       return;
     }
     selectedRunId = run.id;
-    const [nextEvents, nextTranscript, nextApprovals] = await Promise.all([
+    const [nextEvents, nextTranscript, nextApprovals, nextProof] = await Promise.all([
       api.runs.getEvents(run.id),
       api.runs.getTranscript(run.id),
-      api.runs.listApprovals(run.id)
+      api.runs.listApprovals(run.id),
+      api.proof.list(run.id)
     ]);
     events = nextEvents;
     transcript = nextTranscript;
     approvals = nextApprovals;
+    proof = nextProof;
   }
 
   async function refreshAccountStatuses(): Promise<void> {
@@ -208,16 +210,31 @@
     }, "Syncing Linear");
   }
 
-  async function tickScheduler(): Promise<void> {
+  async function tickAutomation(): Promise<void> {
     await runAction(async () => {
-      scheduler = await api.scheduler.tick();
+      orchestrator = await api.orchestrator.tick();
     }, "Dispatching eligible work");
   }
 
-  async function toggleScheduler(): Promise<void> {
+  async function toggleAutomation(): Promise<void> {
     await runAction(async () => {
-      scheduler = scheduler.enabled ? await api.scheduler.stop() : await api.scheduler.start();
-    }, scheduler.enabled ? "Stopping scheduler" : "Starting scheduler");
+      orchestrator = orchestrator?.state.paused ? { state: await api.orchestrator.resume(), queuedTaskIds: [], activeRuns: [] } : { state: await api.orchestrator.pause(), queuedTaskIds: [], activeRuns: [] };
+    }, orchestrator?.state.paused ? "Resuming automation" : "Pausing automation");
+  }
+
+  async function buildHandoff(): Promise<void> {
+    if (!selectedRun) return;
+    busy = true;
+    status = "Building handoff";
+    try {
+      handoff = await api.handoff.build(selectedRun.id);
+      runDetailTab = "handoff";
+      await refresh();
+    } catch (error) {
+      status = (error as Error).message;
+    } finally {
+      busy = false;
+    }
   }
 
   async function startRun(task: Task): Promise<void> {
@@ -349,7 +366,7 @@
 
         <section>
           <div class="mb-2 flex items-center justify-between">
-            <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-600">Health</h2>
+            <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-600">Setup health</h2>
             <Button variant="ghost" className="h-7 px-2" on:click={refresh} disabled={busy}>
               <RefreshCw size={14} />
             </Button>
@@ -378,24 +395,24 @@
         <div class="flex items-center justify-between gap-4">
           <div class="flex items-center gap-4">
             <div>
-              <p class="text-xs font-semibold uppercase tracking-wide text-stone-600">Operator cockpit</p>
-              <h2 class="mt-1 text-xl font-semibold tracking-tight">Review-gated Linear automation</h2>
+              <p class="text-xs font-semibold uppercase tracking-wide text-stone-600">Mostly autonomous execution</p>
+              <h2 class="mt-1 text-xl font-semibold tracking-tight">Autonomous Command Center</h2>
             </div>
             <div class="hidden items-center gap-2 lg:flex">
-              <Badge tone={scheduler.enabled ? "good" : "neutral"}>{scheduler.enabled ? "Polling" : "Paused"}</Badge>
+              <Badge tone={orchestrator?.state.paused ? "neutral" : "good"}>{orchestrator?.state.paused ? "Paused" : "Polling"}</Badge>
               <Badge tone={pendingApprovals.length ? "warn" : "neutral"}>{pendingApprovals.length} approvals</Badge>
               <Badge tone={failedRuns.length ? "bad" : "neutral"}>{failedRuns.length} failed</Badge>
             </div>
           </div>
           <div class="flex items-center gap-2">
             <Badge tone={busy ? "warn" : "good"}>{status}</Badge>
-            <Button variant={scheduler.enabled ? "secondary" : "primary"} on:click={toggleScheduler} disabled={busy}>
-              {#if scheduler.enabled}<Square size={16} />{:else}<Play size={16} />{/if}
-              {scheduler.enabled ? "Pause" : "Start"}
+            <Button variant={orchestrator?.state.paused ? "primary" : "secondary"} on:click={toggleAutomation} disabled={busy}>
+              {#if orchestrator?.state.paused}<Play size={16} />{:else}<Square size={16} />{/if}
+              {orchestrator?.state.paused ? "Resume automation" : "Pause automation"}
             </Button>
-            <Button variant="secondary" on:click={tickScheduler} disabled={busy}>
+            <Button variant="secondary" on:click={tickAutomation} disabled={busy}>
               <Activity size={16} />
-              Dispatch
+              Tick now
             </Button>
             <Button variant="ghost" on:click={refresh} disabled={busy}>
               <RefreshCw size={16} />
@@ -547,7 +564,7 @@
               <div class="flex items-center justify-between border-b border-stone-300 px-4 py-3">
                 <div class="flex items-center gap-2">
                   <MessageSquareText size={18} />
-                  <h3 class="font-semibold">Codex transcript</h3>
+                  <h3 class="font-semibold">Run detail</h3>
                 </div>
                 <div class="flex gap-2">
                   {#if selectedRun}
@@ -561,23 +578,95 @@
                   {/if}
                 </div>
               </div>
-              <div class="min-h-0 overflow-auto bg-[oklch(0.18_0.012_80)] p-4 text-xs text-stone-100">
-                {#each transcript as item}
-                  <article class="mb-3 rounded-md border border-stone-700 bg-stone-900/70 p-3">
-                    <div class="mb-2 flex items-center justify-between gap-3 text-stone-400">
-                      <span class="truncate">{item.title}</span>
-                      <span class="shrink-0">{transcriptMetrics(item.text)}</span>
-                    </div>
-                    <pre class="whitespace-pre-wrap font-mono leading-[18px] text-stone-100">{item.text}</pre>
-                  </article>
-                {:else}
-                  <div class="flex h-full min-h-80 items-center justify-center text-stone-500">
-                    <div class="text-center">
-                      <ShieldCheck class="mx-auto mb-3" size={26} />
-                      <p>No run transcript selected.</p>
-                    </div>
+              <div class="border-b border-stone-300 bg-stone-50 px-3 py-2">
+                <div class="flex flex-wrap gap-1">
+                  {#each runDetailTabs as tab}
+                    <button
+                      class="rounded-md px-2 py-1 text-xs font-medium capitalize {runDetailTab === tab ? 'bg-stone-950 text-stone-50' : 'text-stone-600 hover:bg-stone-200'}"
+                      on:click={() => (runDetailTab = tab)}
+                    >
+                      {tab}
+                    </button>
+                  {/each}
+                </div>
+              </div>
+              <div class="min-h-0 overflow-auto p-4 text-xs">
+                {#if runDetailTab === "transcript"}
+                  <div class="-m-4 min-h-full bg-[oklch(0.18_0.012_80)] p-4 text-stone-100">
+                    {#each transcript as item}
+                      <article class="mb-3 rounded-md border border-stone-700 bg-stone-900/70 p-3">
+                        <div class="mb-2 flex items-center justify-between gap-3 text-stone-400">
+                          <span class="truncate">{item.title}</span>
+                          <span class="shrink-0">{transcriptMetrics(item.text)}</span>
+                        </div>
+                        <pre class="whitespace-pre-wrap font-mono leading-[18px] text-stone-100">{item.text}</pre>
+                      </article>
+                    {:else}
+                      <div class="flex h-full min-h-80 items-center justify-center text-stone-500">
+                        <div class="text-center">
+                          <ShieldCheck class="mx-auto mb-3" size={26} />
+                          <p>No run transcript selected.</p>
+                        </div>
+                      </div>
+                    {/each}
                   </div>
-                {/each}
+                {:else if runDetailTab === "events"}
+                  {#each events.slice().reverse() as event}
+                    <div class="mb-2 rounded-md border border-stone-300 bg-stone-50 p-3">
+                      <div class="flex items-center justify-between gap-2 text-stone-600">
+                        <span>{event.type}</span>
+                        <span>{event.timestamp}</span>
+                      </div>
+                      {#if event.message}
+                        <pre class="mt-1 whitespace-pre-wrap text-stone-800">{event.message}</pre>
+                      {/if}
+                    </div>
+                  {:else}
+                    <p class="rounded-md border border-dashed border-stone-300 p-3 text-sm text-stone-600">No events selected.</p>
+                  {/each}
+                {:else if runDetailTab === "approvals"}
+                  {#each approvals as approval}
+                    <div class="mb-2 rounded-md border border-stone-300 bg-stone-50 p-3">
+                      <div class="flex items-start justify-between gap-2">
+                        <div>
+                          <p class="text-sm font-medium">{approval.title}</p>
+                          <p class="mt-1 text-xs text-stone-600">{approval.detail}</p>
+                        </div>
+                        <Badge tone={approval.status === "pending" ? "warn" : approval.status === "approved" ? "good" : "bad"}>{approval.status}</Badge>
+                      </div>
+                    </div>
+                  {:else}
+                    <p class="rounded-md border border-dashed border-stone-300 p-3 text-sm text-stone-600">No approvals for this run.</p>
+                  {/each}
+                {:else if runDetailTab === "proof"}
+                  {#each proof as entry}
+                    <div class="mb-2 rounded-md border border-stone-300 bg-stone-50 p-3">
+                      <div class="flex items-center justify-between gap-2">
+                        <span class="text-sm font-medium">{entry.label}</span>
+                        <Badge tone={entry.status === "passed" ? "good" : entry.status === "failed" ? "bad" : entry.status === "warning" ? "warn" : "neutral"}>{entry.status}</Badge>
+                      </div>
+                      <p class="mt-1 text-xs text-stone-600">{entry.detail}</p>
+                    </div>
+                  {:else}
+                    <p class="rounded-md border border-dashed border-stone-300 p-3 text-sm text-stone-600">Proof appears as the run reports tests, CI, review and summaries.</p>
+                  {/each}
+                {:else if runDetailTab === "workspace"}
+                  <div class="rounded-md border border-stone-300 bg-stone-50 p-3 text-sm">
+                    <p class="font-medium">Workspace</p>
+                    <p class="mt-1 break-all text-stone-600">{selectedRun?.workspacePath ?? "No workspace path recorded."}</p>
+                    <p class="mt-3 font-medium">Run id</p>
+                    <p class="mt-1 break-all text-stone-600">{selectedRun?.id ?? "No run selected."}</p>
+                  </div>
+                {:else if runDetailTab === "handoff"}
+                  <div class="mb-3 flex justify-end">
+                    <Button variant="secondary" className="h-8" on:click={buildHandoff} disabled={!selectedRun || busy}>Build handoff</Button>
+                  </div>
+                  {#if handoff}
+                    <pre class="whitespace-pre-wrap rounded-md bg-stone-950 p-3 text-xs text-stone-100">{handoff.body}</pre>
+                  {:else}
+                    <p class="rounded-md border border-dashed border-stone-300 p-3 text-sm text-stone-600">Build a handoff when the run is ready for Human Review.</p>
+                  {/if}
+                {/if}
               </div>
             </Card>
           </div>
@@ -587,7 +676,7 @@
           <Card className="p-4">
             <div class="mb-3 flex items-center gap-2">
               <Workflow size={18} />
-              <h3 class="font-semibold">Scheduler</h3>
+              <h3 class="font-semibold">Automation</h3>
             </div>
             <div class="grid grid-cols-2 gap-2 text-sm">
               <div class="rounded-md bg-stone-100 p-2">
@@ -596,7 +685,7 @@
               </div>
               <div class="rounded-md bg-stone-100 p-2">
                 <p class="text-xs text-stone-600">Queued</p>
-                <p class="mt-1 font-semibold">{scheduler.queuedTaskIds.length}</p>
+                <p class="mt-1 font-semibold">{orchestrator?.queuedTaskIds.length ?? 0}</p>
               </div>
               <div class="rounded-md bg-stone-100 p-2">
                 <p class="text-xs text-stone-600">Review</p>
@@ -604,21 +693,21 @@
               </div>
               <div class="rounded-md bg-stone-100 p-2">
                 <p class="text-xs text-stone-600">Retries</p>
-                <p class="mt-1 font-semibold">{scheduler.retryQueue.length}</p>
+                <p class="mt-1 font-semibold">{orchestrator?.state.retryQueue.length ?? 0}</p>
               </div>
             </div>
-            {#if scheduler.lastPollAt}
-              <p class="mt-3 flex items-center gap-2 text-xs text-stone-600"><Clock3 size={14} /> Last poll {scheduler.lastPollAt}</p>
+            {#if orchestrator?.state.lastTickAt}
+              <p class="mt-3 flex items-center gap-2 text-xs text-stone-600"><Clock3 size={14} /> Last tick {orchestrator.state.lastTickAt}</p>
             {/if}
-            {#if scheduler.lastError}
-              <p class="mt-3 text-sm text-red-700">{scheduler.lastError}</p>
+            {#if orchestrator?.state.lastError}
+              <p class="mt-3 text-sm text-red-700">{orchestrator.state.lastError}</p>
             {/if}
           </Card>
 
           <Card className="p-4">
             <div class="mb-3 flex items-center gap-2">
               <ShieldCheck size={18} />
-              <h3 class="font-semibold">Approvals</h3>
+              <h3 class="font-semibold">Approval queue</h3>
             </div>
             <div class="space-y-2">
               {#each approvals as approval}
@@ -640,6 +729,33 @@
               {:else}
                 <div class="rounded-md border border-dashed border-stone-300 p-3 text-sm text-stone-600">
                   Approval requests appear here while a Codex run is blocked.
+                </div>
+              {/each}
+            </div>
+          </Card>
+
+          <Card className="p-4">
+            <div class="mb-3 flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <CheckCircle2 size={18} />
+                <h3 class="font-semibold">Proof of work</h3>
+              </div>
+              {#if selectedRun}
+                <Button variant="ghost" className="h-8 px-2" on:click={buildHandoff} disabled={busy}>Handoff</Button>
+              {/if}
+            </div>
+            <div class="space-y-2">
+              {#each proof as entry}
+                <div class="rounded-md border border-stone-300 bg-stone-50 p-3">
+                  <div class="flex items-center justify-between gap-2">
+                    <p class="truncate text-sm font-medium">{entry.label}</p>
+                    <Badge tone={entry.status === "passed" ? "good" : entry.status === "failed" ? "bad" : entry.status === "warning" ? "warn" : "neutral"}>{entry.status}</Badge>
+                  </div>
+                  <p class="mt-1 line-clamp-3 text-xs text-stone-600">{entry.detail}</p>
+                </div>
+              {:else}
+                <div class="rounded-md border border-dashed border-stone-300 p-3 text-sm text-stone-600">
+                  Proof appears as Codex reports tests, CI, review, token usage and completion summaries.
                 </div>
               {/each}
             </div>

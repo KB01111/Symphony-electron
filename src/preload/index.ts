@@ -56,6 +56,12 @@ const api: SymphonyApi = {
     tick: () => invoke("orchestrator:tick"),
     updatePolicy: (policy) => invoke("orchestrator:updatePolicy", policy)
   },
+  proof: {
+    list: (runId: string) => invoke("proof:list", runId)
+  },
+  handoff: {
+    build: (runId: string) => invoke("handoff:build", runId)
+  },
   logs: {
     tail: (runId: string) => invoke("logs:tail", runId),
     export: (runId: string) => invoke("logs:export", runId)

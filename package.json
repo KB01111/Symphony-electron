@@ -22,7 +22,7 @@
     "@tailwindcss/vite": "^4.1.13",
     "clsx": "^2.1.1",
     "liquidjs": "^10.25.7",
-    "lucide-svelte": "^0.468.0",
+    "lucide-svelte": "^1.0.1",
     "svelte": "^5.38.0",
     "tailwind-merge": "^2.6.0",
     "yaml": "^2.8.3",

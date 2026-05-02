@@ -3,7 +3,7 @@ import { OrchestratorService } from "../src/main/services/orchestrator-service.j
 import { defaultOrchestratorState } from "../src/main/services/orchestrator-state.js";
 import type { OrchestratorState, Run, Task } from "../src/shared/types.js";
 
-function task(id: string, status = "Ready"): Task {
+function task(id: string, status = "Ready", overrides: Partial<Task> = {}): Task {
   return {
     id,
     source: "linear",
@@ -13,8 +13,15 @@ function task(id: string, status = "Ready"): Task {
     description: "",
     status,
     priority: 0,
-    updatedAt: "2026-05-02T10:00:00.000Z"
+    updatedAt: "2026-05-02T10:00:00.000Z",
+    ...overrides
   };
+}
+
+function todoTask(id: string, blockerState = "In Progress"): Task {
+  return task(id, "Todo", {
+    blockers: [{ id: "dep-1", identifier: "DEP-1", state: blockerState }]
+  });
 }
 
 function run(id: string, taskId: string, state: Run["state"] = "running"): Run {
@@ -151,6 +158,147 @@ test("terminal runs block automatic reruns for the same task", async () => {
   expect(startRun).not.toHaveBeenCalled();
   expect(snapshot.state.activeClaims).toEqual([]);
   expect(snapshot.queuedTaskIds).toEqual([]);
+});
+
+test("does not dispatch Todo tasks with non-terminal blockers", async () => {
+  let state: OrchestratorState = {
+    ...defaultOrchestratorState(),
+    policy: {
+      ...defaultOrchestratorState().policy,
+      terminalStateNames: ["Done", "Closed"]
+    }
+  };
+  const started: string[] = [];
+  const service = new OrchestratorService({
+    readState: async () => state,
+    writeState: async (next) => {
+      state = next;
+    },
+    listCandidateTasks: async () => [todoTask("blocked"), todoTask("ready", "Done")],
+    listRuns: async () => [],
+    startRun: async (candidate) => {
+      started.push(candidate.id);
+      return run(`run-${candidate.id}`, candidate.id);
+    },
+    appendEvent: async () => undefined,
+    now: () => new Date("2026-05-02T10:00:00.000Z")
+  });
+
+  const snapshot = await service.tick();
+
+  expect(started).toEqual(["ready"]);
+  expect(snapshot.queuedTaskIds).toEqual(["blocked"]);
+});
+
+test("applies per-state concurrency limits before the global limit", async () => {
+  let state: OrchestratorState = {
+    ...defaultOrchestratorState(),
+    policy: {
+      ...defaultOrchestratorState().policy,
+      maxConcurrentRuns: 4,
+      maxConcurrentRunsByState: { ready: 1 }
+    }
+  };
+  const started: string[] = [];
+  const service = new OrchestratorService({
+    readState: async () => state,
+    writeState: async (next) => {
+      state = next;
+    },
+    listCandidateTasks: async () => [task("a"), task("b")],
+    listRuns: async () => [],
+    startRun: async (candidate) => {
+      started.push(candidate.id);
+      return run(`run-${candidate.id}`, candidate.id);
+    },
+    appendEvent: async () => undefined,
+    now: () => new Date("2026-05-02T10:00:00.000Z")
+  });
+
+  const snapshot = await service.tick();
+
+  expect(started).toEqual(["a"]);
+  expect(snapshot.queuedTaskIds).toEqual(["b"]);
+});
+
+test("stale active claims are cancelled and retried with backoff", async () => {
+  let state: OrchestratorState = {
+    ...defaultOrchestratorState(),
+    activeClaims: [
+      {
+        taskId: "a",
+        runId: "run-a",
+        identifier: "A",
+        startedAt: "2026-05-02T09:00:00.000Z",
+        lastEventAt: "2026-05-02T09:00:00.000Z"
+      }
+    ],
+    policy: { ...defaultOrchestratorState().policy, stallTimeoutSeconds: 60 }
+  };
+  const cancelled: string[] = [];
+  const service = new OrchestratorService({
+    readState: async () => state,
+    writeState: async (next) => {
+      state = next;
+    },
+    listCandidateTasks: async () => [],
+    listRuns: async () => [run("run-a", "a", "running")],
+    startRun: async (candidate) => run(`run-${candidate.id}`, candidate.id),
+    appendEvent: async () => undefined,
+    terminateRun: async (runId) => {
+      cancelled.push(runId);
+    },
+    now: () => new Date("2026-05-02T09:02:01.000Z")
+  });
+
+  const snapshot = await service.tick();
+
+  expect(cancelled).toEqual(["run-a"]);
+  expect(snapshot.state.activeClaims).toEqual([]);
+  expect(snapshot.state.retryQueue).toEqual([
+    {
+      taskId: "a",
+      attempts: 1,
+      nextAttemptAt: "2026-05-02T09:02:11.000Z",
+      lastError: "stalled"
+    }
+  ]);
+});
+
+test("terminal tracker states cancel active claims without retry", async () => {
+  let state: OrchestratorState = {
+    ...defaultOrchestratorState(),
+    activeClaims: [
+      {
+        taskId: "a",
+        runId: "run-a",
+        identifier: "A",
+        startedAt: "2026-05-02T09:00:00.000Z"
+      }
+    ],
+    policy: { ...defaultOrchestratorState().policy, terminalStateNames: ["Done"] }
+  };
+  const cancelled: string[] = [];
+  const service = new OrchestratorService({
+    readState: async () => state,
+    writeState: async (next) => {
+      state = next;
+    },
+    listCandidateTasks: async () => [task("a", "Done")],
+    listRuns: async () => [run("run-a", "a", "running")],
+    startRun: async (candidate) => run(`run-${candidate.id}`, candidate.id),
+    appendEvent: async () => undefined,
+    terminateRun: async (runId) => {
+      cancelled.push(runId);
+    },
+    now: () => new Date("2026-05-02T09:02:01.000Z")
+  });
+
+  const snapshot = await service.tick();
+
+  expect(cancelled).toEqual(["run-a"]);
+  expect(snapshot.state.activeClaims).toEqual([]);
+  expect(snapshot.state.retryQueue).toEqual([]);
 });
 
 test("scheduled tick failure recording retries when state persistence fails", async () => {
