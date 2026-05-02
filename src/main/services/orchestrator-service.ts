@@ -87,6 +87,7 @@ export class OrchestratorService {
     const nowIso = now.toISOString();
     const activeRuns = runs.filter((run) => ACTIVE_RUN_STATES.has(run.state));
     const runsById = new Map(runs.map((run) => [run.id, run]));
+    const launchedTaskIds = new Set(runs.map((run) => run.taskId));
     const activeTaskIds = new Set(activeRuns.map((run) => run.taskId));
     const activeClaims = state.activeClaims.filter((claim) => {
       const run = runsById.get(claim.runId);
@@ -104,7 +105,7 @@ export class OrchestratorService {
     };
 
     for (const candidate of candidates) {
-      if (claimedTaskIds.has(candidate.id) || activeTaskIds.has(candidate.id)) {
+      if (claimedTaskIds.has(candidate.id) || launchedTaskIds.has(candidate.id)) {
         continue;
       }
 

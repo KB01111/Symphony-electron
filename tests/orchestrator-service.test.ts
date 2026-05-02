@@ -131,6 +131,28 @@ test("stalled runs consume concurrency and keep active claims", async () => {
   expect(snapshot.state.activeClaims).toEqual(state.activeClaims);
 });
 
+test("terminal runs block automatic reruns for the same task", async () => {
+  let state: OrchestratorState = defaultOrchestratorState();
+  const startRun = vi.fn();
+  const service = new OrchestratorService({
+    readState: async () => state,
+    writeState: async (next) => {
+      state = next;
+    },
+    listCandidateTasks: async () => [task("a")],
+    listRuns: async () => [run("run-a", "a", "review")],
+    startRun,
+    appendEvent: async () => undefined,
+    now: () => new Date("2026-05-02T10:00:00.000Z")
+  });
+
+  const snapshot = await service.tick();
+
+  expect(startRun).not.toHaveBeenCalled();
+  expect(snapshot.state.activeClaims).toEqual([]);
+  expect(snapshot.queuedTaskIds).toEqual([]);
+});
+
 test("scheduled tick failure recording retries when state persistence fails", async () => {
   vi.useFakeTimers();
   try {
