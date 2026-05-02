@@ -156,14 +156,13 @@
     const [nextEvents, nextTranscript, nextApprovals, nextProof] = await Promise.all([
       api.runs.getEvents(run.id),
       api.runs.getTranscript(run.id),
-      api.runs.listApprovals(),
+      api.runs.listApprovals(run.id),
       api.proof.list(run.id)
     ]);
     events = nextEvents;
     transcript = nextTranscript;
     approvals = nextApprovals;
     proof = nextProof;
-    handoff = null;
   }
 
   async function refreshAccountStatuses(): Promise<void> {
@@ -225,10 +224,17 @@
 
   async function buildHandoff(): Promise<void> {
     if (!selectedRun) return;
-    await runAction(async () => {
+    busy = true;
+    status = "Building handoff";
+    try {
       handoff = await api.handoff.build(selectedRun.id);
       runDetailTab = "handoff";
-    }, "Building handoff");
+      await refresh();
+    } catch (error) {
+      status = (error as Error).message;
+    } finally {
+      busy = false;
+    }
   }
 
   async function startRun(task: Task): Promise<void> {

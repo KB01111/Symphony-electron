@@ -42,7 +42,10 @@ app.whenReady().then(() => {
   const controller = new AppController(app.getPath("userData"));
   registerIpc(controller);
   createWindow();
-  void controller.startOrchestrator();
+  controller.startOrchestrator().catch((err) => {
+    console.error("Orchestrator failed to start", err);
+    process.exit(1);
+  });
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

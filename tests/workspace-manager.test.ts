@@ -161,6 +161,7 @@ test("beforeRemove with no workflow does not throw", async () => {
 test("executes workflow hooks in workspace lifecycle order", async () => {
   const root = await tempRoot();
   const workflowPath = path.join(root, "WORKFLOW.md");
+  const hookPath = path.join(root, "hook.js");
 
   await writeFile(
     hookPath,

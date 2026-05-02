@@ -151,7 +151,7 @@ export class RunService {
         onNotification: (method, params) => {
           const handled = this.enqueueNotification(run.id, () => this.handleCodexNotification(run.id, method, params));
           if (method === "turn/completed") {
-            void handled.then(() => this.handleTurnCompleted(run.id)).catch(() => {});
+            void handled.finally(() => this.handleTurnCompleted(run.id)).catch(() => {});
           }
         },
         onServerRequest: (request) => this.handleServerRequest(run.id, request),
@@ -522,10 +522,10 @@ function fallbackApprovalResponse(approved: boolean): unknown {
 function inferProofKind(method: string): ProofKind | undefined {
   const normalized = method.toLowerCase();
   if (normalized.includes("test")) return "test";
-  if (normalized.includes("ci")) return "ci";
+  if (/\bci\b|^ci[_.-]|[_.-]ci$|[_.-]ci[_.-]/.test(normalized)) return "ci";
   if (normalized.includes("review")) return "review";
   if (normalized.includes("diff")) return "diff";
-  if (normalized.includes("pullrequest") || normalized.includes("pr")) return "pr";
+  if (normalized.includes("pullrequest") || normalized.includes("pull-request") || normalized.includes("pull_request") || normalized.includes("pull.request") || /\bpr\b|^pr[_.-]|[_.-]pr$|[_.-]pr[_.-]/.test(normalized)) return "pr";
   return undefined;
 }
 

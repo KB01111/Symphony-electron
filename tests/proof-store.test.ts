@@ -17,14 +17,32 @@ afterEach(async () => {
 });
 
 test("stores proof entries per run in creation order", async () => {
-  const store = new ProofStore(await tempRoot(), () => "2026-05-02T10:00:00.000Z");
+  const fixedTimestamp = "2026-05-02T10:00:00.000Z";
+  const store = new ProofStore(await tempRoot(), () => fixedTimestamp);
 
-  await store.add("run-1", { kind: "test", label: "npm test", status: "passed", detail: "42 passed" });
-  await store.add("run-1", { kind: "summary", label: "Final summary", status: "unknown", detail: "Ready for review" });
+  const [entry1, entry2, entry3] = await Promise.all([
+    store.add("run-1", { kind: "test", label: "npm test", status: "passed", detail: "42 passed" }),
+    store.add("run-1", { kind: "summary", label: "Final summary", status: "unknown", detail: "Ready for review" }),
+    store.add("run-1", { kind: "ci", label: "build", status: "passed", detail: "ok" })
+  ]);
 
-  expect(await store.list("run-1")).toMatchObject([
+  expect(entry1.id).toMatch(/^proof-/);
+  expect(entry1.id).toContain(fixedTimestamp.replace(/[-:TZ.]/g, "").slice(0, 17));
+  expect(entry1.createdAt).toBe(fixedTimestamp);
+  expect(entry2.id).toMatch(/^proof-/);
+  expect(entry2.id).toContain(fixedTimestamp.replace(/[-:TZ.]/g, "").slice(0, 17));
+  expect(entry2.createdAt).toBe(fixedTimestamp);
+  expect(entry3.id).toMatch(/^proof-/);
+  expect(entry3.id).toContain(fixedTimestamp.replace(/[-:TZ.]/g, "").slice(0, 17));
+  expect(entry3.createdAt).toBe(fixedTimestamp);
+
+  const list = await store.list("run-1");
+  expect(list).toHaveLength(3);
+  expect(list.map((e) => e.id)).toEqual(expect.arrayContaining([entry1.id, entry2.id, entry3.id]));
+  expect(list).toMatchObject([
     { runId: "run-1", kind: "test", label: "npm test", status: "passed", detail: "42 passed" },
-    { runId: "run-1", kind: "summary", label: "Final summary", status: "unknown", detail: "Ready for review" }
+    { runId: "run-1", kind: "summary", label: "Final summary", status: "unknown", detail: "Ready for review" },
+    { runId: "run-1", kind: "ci", label: "build", status: "passed", detail: "ok" }
   ]);
   expect(await store.list("run-2")).toEqual([]);
 });
@@ -42,7 +60,7 @@ test("entries for different runs are stored together but listed independently", 
   expect(run1).toHaveLength(2);
   expect(run1.every((e) => e.runId === "run-1")).toBe(true);
   expect(run2).toHaveLength(1);
-  expect(run2[0].runId).toBe("run-2");
+  expect(run2[0]?.runId).toBe("run-2");
 });
 
 test("each entry receives a unique id", async () => {

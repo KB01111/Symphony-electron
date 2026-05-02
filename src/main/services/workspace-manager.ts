@@ -34,11 +34,12 @@ export class WorkspaceManager {
     }
 
     await this.runHook(loadedWorkflow, "afterCreate", workspacePath);
-    await this.runHook(loadedWorkflow, "beforeRun", workspacePath);
 
     const workflowPrompt = await this.renderWorkflowPrompt(task, loadedWorkflow);
     const promptPath = path.join(workspacePath, "SYMPHONY_TASK.md");
     await writeFile(promptPath, workflowPrompt, "utf8");
+
+    await this.runHook(loadedWorkflow, "beforeRun", workspacePath);
 
     return {
       path: workspacePath,
@@ -70,9 +71,6 @@ export class WorkspaceManager {
 
   private async renderWorkflowPrompt(task: Task, loadedWorkflow?: LoadedWorkflow | null): Promise<string> {
     if (this.workflow) {
-      if (loadedWorkflow) {
-        return this.workflow.renderPrompt(task);
-      }
       return this.workflow.renderPrompt(task);
     }
     return [

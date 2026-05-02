@@ -102,6 +102,7 @@ export class OrchestratorService {
       lastTickAt: nowIso
     };
     const stateConcurrency = new Map<string, number>();
+    const claimedRunIds = new Set<string>();
 
     for (const claim of state.activeClaims) {
       const run = runsById.get(claim.runId);
@@ -113,7 +114,9 @@ export class OrchestratorService {
         await this.cancelClaim(claim.runId, "tracker_terminal", "Tracker moved to a terminal state.");
         continue;
       }
-      const lastActivity = new Date(claim.lastEventAt ?? run.updatedAt ?? claim.startedAt).getTime();
+      const lastActivity = Math.max(
+        ...[claim.lastEventAt, run.updatedAt, claim.startedAt].filter(Boolean).map((ts) => new Date(ts!).getTime())
+      );
       const stalled = next.policy.stallTimeoutSeconds > 0 && now.getTime() - lastActivity > next.policy.stallTimeoutSeconds * 1000;
       if (stalled) {
         await this.cancelClaim(claim.runId, "orchestrator.stalled", "Run exceeded stall timeout.");
@@ -129,8 +132,16 @@ export class OrchestratorService {
       const lastEventAt = newerIso(claim.lastEventAt, run.updatedAt);
       const activeClaim = lastEventAt ? { ...claim, lastEventAt } : { ...claim };
       activeClaims.push(activeClaim);
+      claimedRunIds.add(claim.runId);
       const stateKey = normalize(task?.status ?? run.state);
       stateConcurrency.set(stateKey, (stateConcurrency.get(stateKey) ?? 0) + 1);
+    }
+
+    for (const run of activeRuns) {
+      if (!claimedRunIds.has(run.id)) {
+        const stateKey = normalize(run.state);
+        stateConcurrency.set(stateKey, (stateConcurrency.get(stateKey) ?? 0) + 1);
+      }
     }
     next.retryQueue = [...retryQueueByTaskId.values()];
     const claimedTaskIds = new Set(activeClaims.map((claim) => claim.taskId));
