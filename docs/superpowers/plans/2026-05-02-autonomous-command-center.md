@@ -1427,10 +1427,13 @@ for (const claim of state.activeClaims) {
   const stalled = state.policy.stallTimeoutSeconds > 0 && this.now().getTime() - last > state.policy.stallTimeoutSeconds * 1000;
   if (!stalled) continue;
   await this.options.terminateRun?.(claim.runId);
+  const previous = state.retryQueue.find((r) => r.taskId === claim.taskId);
+  const attempts = (previous?.attempts ?? 0) + 1;
+  nextState.retryQueue = nextState.retryQueue.filter((r) => r.taskId !== claim.taskId);
   nextState.retryQueue.push({
     taskId: claim.taskId,
-    attempts: 1,
-    nextAttemptAt: new Date(this.now().getTime() + 10_000).toISOString(),
+    attempts,
+    nextAttemptAt: nextRetry(attempts, state.policy.maxRetryBackoffSeconds, this.now()),
     lastError: "stalled"
   });
 }
