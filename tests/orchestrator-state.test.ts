@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
-import { OrchestratorStateStore } from "../src/main/services/orchestrator-state.js";
+import { defaultOrchestratorState, OrchestratorStateStore } from "../src/main/services/orchestrator-state.js";
 
 const tempDirs: string[] = [];
 
@@ -81,4 +81,22 @@ test("backfills defaults when reading older partial orchestrator state", async (
   expect(state.policy.requireApprovalFor).toEqual(["command"]);
   expect(state.activeClaims).toEqual([]);
   expect(state.retryQueue).toEqual([]);
+});
+
+test("clones policy arrays for defaults and backfilled reads", async () => {
+  const defaultState = defaultOrchestratorState();
+  defaultState.policy.terminalStateNames.push("Mutated");
+  defaultState.policy.requireApprovalFor.push("command");
+
+  expect(defaultOrchestratorState().policy.terminalStateNames).toEqual(["Done", "Canceled", "Cancelled", "Duplicate"]);
+  expect(defaultOrchestratorState().policy.requireApprovalFor).toEqual(["merge"]);
+
+  const store = new OrchestratorStateStore(await tempRoot());
+  const readState = await store.read();
+  readState.policy.terminalStateNames.push("ReadMutated");
+  readState.policy.requireApprovalFor.push("network");
+
+  const laterState = await store.read();
+  expect(laterState.policy.terminalStateNames).toEqual(["Done", "Canceled", "Cancelled", "Duplicate"]);
+  expect(laterState.policy.requireApprovalFor).toEqual(["merge"]);
 });

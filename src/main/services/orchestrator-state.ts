@@ -14,11 +14,19 @@ export const defaultAutomationPolicy: AutomationPolicy = {
   requireApprovalFor: ["merge"]
 };
 
+function cloneAutomationPolicy(policy: AutomationPolicy): AutomationPolicy {
+  return {
+    ...policy,
+    terminalStateNames: [...policy.terminalStateNames],
+    requireApprovalFor: [...policy.requireApprovalFor]
+  };
+}
+
 export function defaultOrchestratorState(): OrchestratorState {
   return {
     mode: "autonomous",
     paused: false,
-    policy: { ...defaultAutomationPolicy },
+    policy: cloneAutomationPolicy(defaultAutomationPolicy),
     activeClaims: [],
     retryQueue: []
   };
@@ -39,7 +47,7 @@ export class OrchestratorStateStore {
     return {
       ...defaultOrchestratorState(),
       ...state,
-      policy: { ...defaultAutomationPolicy, ...state.policy },
+      policy: cloneAutomationPolicy({ ...defaultAutomationPolicy, ...state.policy }),
       activeClaims: state.activeClaims ?? [],
       retryQueue: state.retryQueue ?? []
     };
