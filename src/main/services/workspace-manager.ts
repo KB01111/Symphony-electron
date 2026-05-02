@@ -115,7 +115,7 @@ export class WorkspaceManager {
     if (!command) return;
     await execAsync(command, {
       cwd: workspacePath,
-      timeout: loadedWorkflow.config.hooks.timeoutMs,
+      timeout: loadedWorkflow.config.hooks.timeoutMs ?? 60_000,
       windowsHide: true,
       env: {
         ...process.env,
