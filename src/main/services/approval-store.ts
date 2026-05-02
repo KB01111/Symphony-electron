@@ -61,6 +61,9 @@ export class ApprovalStore {
         throw new Error(`Unknown approval request: ${requestId}`);
       }
       const request = approvals[index] as ApprovalRequest;
+      if (request.approved !== undefined) {
+        throw new Error(`Approval request already responded: ${requestId}`);
+      }
       const updated: ApprovalRequest = {
         ...request,
         approved,

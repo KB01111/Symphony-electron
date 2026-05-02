@@ -45,6 +45,55 @@ test("throws when responding to an unknown approval request", async () => {
   await expect(store.respond("approval-missing", true)).rejects.toThrow("Unknown approval request: approval-missing");
 });
 
+test("throws when responding to an already answered approval request", async () => {
+  const store = new ApprovalStore(await tempRoot());
+  const request = await store.create({
+    runId: "run-1",
+    kind: "command",
+    title: "Run tests",
+    detail: "npm test",
+    payload: { command: "npm test" }
+  });
+
+  const first = await store.respond(request.id, true);
+  await expect(store.respond(request.id, false)).rejects.toThrow(`Approval request already responded: ${request.id}`);
+
+  expect(await store.get(request.id)).toMatchObject({
+    approved: true,
+    respondedAt: first.respondedAt
+  });
+});
+
+test("allows only one concurrent response attempt to answer an approval request", async () => {
+  const store = new ApprovalStore(await tempRoot());
+  const request = await store.create({
+    runId: "run-1",
+    kind: "command",
+    title: "Run tests",
+    detail: "npm test",
+    payload: { command: "npm test" }
+  });
+
+  const results = await Promise.allSettled([
+    store.respond(request.id, true),
+    store.respond(request.id, false),
+    store.respond(request.id, false),
+    store.respond(request.id, true)
+  ]);
+
+  const fulfilled = results.filter((result) => result.status === "fulfilled");
+  const rejected = results.filter((result) => result.status === "rejected");
+
+  expect(fulfilled).toHaveLength(1);
+  expect(rejected).toHaveLength(3);
+  expect(rejected.map((result) => (result as PromiseRejectedResult).reason.message)).toEqual([
+    `Approval request already responded: ${request.id}`,
+    `Approval request already responded: ${request.id}`,
+    `Approval request already responded: ${request.id}`
+  ]);
+  expect(await store.get(request.id)).toMatchObject({ approved: true });
+});
+
 test("lists approvals filtered by run id", async () => {
   const store = new ApprovalStore(await tempRoot());
   const run1 = await store.create({
