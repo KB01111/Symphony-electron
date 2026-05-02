@@ -194,6 +194,8 @@ export function isApprovalRequestMethod(method: string): boolean {
   return (
     normalized === "requestapproval" ||
     normalized === "request_approval" ||
+    normalized === "applypatchapproval" ||
+    normalized === "execcommandapproval" ||
     normalized.endsWith("/requestapproval") ||
     normalized.endsWith("/request_approval")
   );
