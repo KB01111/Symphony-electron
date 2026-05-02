@@ -3,6 +3,7 @@ import type {
   CodexAccountStatus,
   HealthCheckResult,
   LinearConfig,
+  OrchestratorState,
   Profile,
   Run,
   SchedulerSnapshot,
@@ -36,6 +37,7 @@ export class AppController {
   readonly scheduler: OrchestrationService;
   readonly orchestratorState: OrchestratorStateStore;
   readonly orchestrator: OrchestratorService;
+  private schedulerDisabled = false;
 
   constructor(readonly appDataRoot: string) {
     this.profiles = new ProfileService({ appDataRoot });
@@ -185,6 +187,9 @@ export class AppController {
   }
 
   startScheduler(): Promise<SchedulerSnapshot> {
+    if (this.schedulerDisabled) {
+      return Promise.resolve(this.scheduler.stop());
+    }
     return this.scheduler.start();
   }
 
@@ -198,6 +203,24 @@ export class AppController {
 
   schedulerSnapshot(): SchedulerSnapshot {
     return this.scheduler.snapshot();
+  }
+
+  async startOrchestrator(): Promise<OrchestratorState> {
+    this.schedulerDisabled = true;
+    this.scheduler.stop();
+    return this.orchestrator.start();
+  }
+
+  async pauseOrchestrator(): Promise<OrchestratorState> {
+    const state = await this.orchestrator.pause();
+    this.schedulerDisabled = false;
+    return state;
+  }
+
+  async resumeOrchestrator(): Promise<OrchestratorState> {
+    this.schedulerDisabled = true;
+    this.scheduler.stop();
+    return this.orchestrator.resume();
   }
 
   private async markRunReadyForReview(run: Run): Promise<void> {

@@ -54,9 +54,9 @@ export function registerIpc(controller: AppController): void {
   ipcMain.handle("runs:respondToApproval", (_event, requestId: string, approved: boolean) => controller.runs.respondToApproval(requestId, approved));
 
   ipcMain.handle("orchestrator:snapshot", () => controller.orchestrator.snapshot());
-  ipcMain.handle("orchestrator:start", () => controller.orchestrator.start());
-  ipcMain.handle("orchestrator:pause", () => controller.orchestrator.pause());
-  ipcMain.handle("orchestrator:resume", () => controller.orchestrator.resume());
+  ipcMain.handle("orchestrator:start", () => controller.startOrchestrator());
+  ipcMain.handle("orchestrator:pause", () => controller.pauseOrchestrator());
+  ipcMain.handle("orchestrator:resume", () => controller.resumeOrchestrator());
   ipcMain.handle("orchestrator:tick", () => controller.orchestrator.tick());
   ipcMain.handle("orchestrator:updatePolicy", (_event, policy: Partial<AutomationPolicy>) => controller.orchestrator.updatePolicy(policy));
 
