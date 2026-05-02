@@ -71,7 +71,6 @@ export class WorkspaceManager {
   private async renderWorkflowPrompt(task: Task, loadedWorkflow?: LoadedWorkflow | null): Promise<string> {
     if (this.workflow) {
       if (loadedWorkflow) {
-        const template = loadedWorkflow.promptTemplate;
         return this.workflow.renderPrompt(task);
       }
       return this.workflow.renderPrompt(task);
