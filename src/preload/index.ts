@@ -28,6 +28,8 @@ const api: SymphonyApi = {
     cancel: (runId: string) => invoke("runs:cancel", runId),
     retry: (runId: string) => invoke("runs:retry", runId),
     getEvents: (runId: string) => invoke("runs:getEvents", runId),
+    listApprovals: (runId?: string) => invoke("runs:listApprovals", runId),
+    listPendingApprovals: () => invoke("runs:listPendingApprovals"),
     respondToApproval: (requestId: string, approved: boolean) => invoke("runs:respondToApproval", requestId, approved)
   },
   orchestrator: {

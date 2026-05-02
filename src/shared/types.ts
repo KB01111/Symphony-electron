@@ -131,6 +131,8 @@ export interface ApprovalRequest {
   detail: string;
   payload: unknown;
   createdAt: string;
+  respondedAt?: string;
+  approved?: boolean;
 }
 
 export interface HealthCheckResult {
@@ -170,6 +172,8 @@ export interface SymphonyApi {
     cancel(runId: string): Promise<Run>;
     retry(runId: string): Promise<Run>;
     getEvents(runId: string): Promise<RunEvent[]>;
+    listApprovals(runId?: string): Promise<ApprovalRequest[]>;
+    listPendingApprovals(): Promise<ApprovalRequest[]>;
     respondToApproval(requestId: string, approved: boolean): Promise<void>;
   };
   orchestrator: {

@@ -1,5 +1,6 @@
 import path from "node:path";
 import type { HealthCheckResult, LinearConfig, Run, Task } from "../shared/types.js";
+import { ApprovalStore } from "./services/approval-store.js";
 import { JsonlEventLog } from "./services/event-log.js";
 import { LinearClient } from "./services/linear-client.js";
 import { LinearConfigService } from "./services/linear-config-service.js";
@@ -15,6 +16,7 @@ export class AppController {
   readonly profiles: ProfileService;
   readonly tasks: TaskService;
   readonly runs: RunService;
+  readonly approvals: ApprovalStore;
   readonly linearConfig: LinearConfigService;
   readonly linear: LinearClient;
   readonly eventLog: JsonlEventLog;
@@ -27,7 +29,13 @@ export class AppController {
     this.linearConfig = new LinearConfigService(appDataRoot);
     this.linear = new LinearClient();
     this.eventLog = new JsonlEventLog(path.join(appDataRoot, "logs"));
-    this.runs = new RunService(appDataRoot, this.eventLog, new WorkspaceManager({ workflowPath: path.join(process.cwd(), "WORKFLOW.md") }));
+    this.approvals = new ApprovalStore(appDataRoot);
+    this.runs = new RunService(
+      appDataRoot,
+      this.eventLog,
+      new WorkspaceManager({ workflowPath: path.join(process.cwd(), "WORKFLOW.md") }),
+      this.approvals
+    );
     this.orchestratorState = new OrchestratorStateStore(appDataRoot);
     this.orchestrator = new OrchestratorService({
       readState: () => this.orchestratorState.read(),
@@ -77,6 +85,15 @@ export class AppController {
     const run = await this.runs.get(runId);
     const [task, profile] = await Promise.all([this.tasks.get(run.taskId), this.profiles.get(run.profileId)]);
     return this.runs.retry(run, task, profile);
+  }
+
+  async respondToApproval(requestId: string, approved: boolean): Promise<void> {
+    const request = await this.approvals.respond(requestId, approved);
+    await this.eventLog.append(request.runId, {
+      type: "approval.responded",
+      message: approved ? "Approval granted by operator." : "Approval denied by operator.",
+      payload: request
+    });
   }
 
   async checkAllHealth(): Promise<HealthCheckResult[]> {

@@ -21,7 +21,9 @@ export function registerIpc(controller: AppController): void {
   ipcMain.handle("runs:cancel", (_event, runId: string) => controller.runs.cancel(runId));
   ipcMain.handle("runs:retry", (_event, runId: string) => controller.retryRun(runId));
   ipcMain.handle("runs:getEvents", (_event, runId: string) => controller.eventLog.replay(runId));
-  ipcMain.handle("runs:respondToApproval", async () => undefined);
+  ipcMain.handle("runs:listApprovals", (_event, runId?: string) => controller.approvals.list(runId));
+  ipcMain.handle("runs:listPendingApprovals", () => controller.approvals.listPending());
+  ipcMain.handle("runs:respondToApproval", (_event, requestId: string, approved: boolean) => controller.respondToApproval(requestId, approved));
 
   ipcMain.handle("orchestrator:snapshot", () => controller.orchestrator.snapshot());
   ipcMain.handle("orchestrator:start", () => controller.orchestrator.start());

@@ -2,7 +2,8 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
-import type { Profile, Run, Task } from "../../shared/types.js";
+import type { ApprovalKind, Profile, Run, Task } from "../../shared/types.js";
+import { ApprovalStore } from "./approval-store.js";
 import { FileStateStore } from "./file-state.js";
 import { JsonlEventLog } from "./event-log.js";
 import { isoNow } from "./time.js";
@@ -18,7 +19,8 @@ export class RunService {
   constructor(
     appDataRoot: string,
     private readonly eventLog: JsonlEventLog,
-    private readonly workspaceManager: WorkspaceManager
+    private readonly workspaceManager: WorkspaceManager,
+    private readonly approvals: ApprovalStore
   ) {
     this.store = new FileStateStore<Run[]>(path.join(appDataRoot, "state", "runs.json"), []);
   }
@@ -88,7 +90,7 @@ export class RunService {
         cwd: workspace.path,
         onStdout: (chunk) => void this.eventLog.append(run.id, { type: "codex.stdout", stream: "stdout", message: chunk }),
         onStderr: (chunk) => void this.eventLog.append(run.id, { type: "codex.stderr", stream: "stderr", message: chunk }),
-        onNotification: (method, params) => void this.eventLog.append(run.id, { type: `codex.${method}`, payload: params }),
+        onNotification: (method, params) => void this.handleNotification(run, method, params),
         onExit: (exitCode, signal) => {
           this.active.delete(run.id);
           void this.handleExit(run.id, exitCode, signal);
@@ -129,6 +131,18 @@ export class RunService {
     });
   }
 
+  private async handleNotification(run: Run, method: string, params: unknown): Promise<void> {
+    await this.eventLog.append(run.id, { type: `codex.${method}`, payload: params });
+    if (!isApprovalNotification(method)) return;
+    await this.approvals.create({
+      runId: run.id,
+      kind: inferApprovalKind(method, params),
+      title: method,
+      detail: stringifyApprovalDetail(params),
+      payload: params
+    });
+  }
+
   private async patch(runId: string, patch: Partial<Run>): Promise<Run> {
     const run = await this.get(runId);
     const updated = { ...run, ...patch, updatedAt: patch.updatedAt ?? isoNow() };
@@ -146,4 +160,28 @@ export class RunService {
     }
     await this.store.write(runs);
   }
+}
+
+function isApprovalNotification(method: string): boolean {
+  const normalized = method.toLowerCase();
+  return (
+    normalized.includes("request_approval") ||
+    normalized.includes("approval") ||
+    normalized.includes("file_change") ||
+    normalized.includes("filechange") ||
+    normalized.includes("command_execution") ||
+    normalized.includes("commandexecution")
+  );
+}
+
+function inferApprovalKind(method: string, _params: unknown): ApprovalKind {
+  const normalized = method.toLowerCase();
+  if (normalized.includes("command")) return "command";
+  if (normalized.includes("file_change") || normalized.includes("filechange") || normalized.includes("patch")) return "patch";
+  if (normalized.includes("network")) return "network";
+  return "unknown";
+}
+
+function stringifyApprovalDetail(params: unknown): string {
+  return (JSON.stringify(params, null, 2) ?? "").slice(0, 4000);
 }
