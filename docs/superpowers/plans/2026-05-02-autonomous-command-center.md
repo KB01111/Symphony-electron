@@ -478,6 +478,7 @@ export class OrchestratorService {
           startedAt: run.startedAt ?? this.now().toISOString()
         });
         activeTaskIds.add(candidate.id);
+        nextState.retryQueue = nextState.retryQueue.filter((r) => r.taskId !== candidate.id);
       } catch (error) {
         nextState.retryQueue.push({
           taskId: candidate.id,
