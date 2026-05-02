@@ -77,3 +77,13 @@ test("client writes JSON-RPC responses for server requests", () => {
   ]);
 });
 
+test("client reports malformed JSON-RPC input to caller", () => {
+  const transport = {
+    write: vi.fn(),
+    close: vi.fn()
+  };
+  const client = new CodexJsonRpcClient(transport);
+
+  expect(() => client.acceptLine("{not json")).toThrow();
+});
+

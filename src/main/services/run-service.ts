@@ -93,6 +93,12 @@ export class RunService {
         onStderr: (chunk) => void this.eventLog.append(run.id, { type: "codex.stderr", stream: "stderr", message: chunk }),
         onNotification: (method, params) => void this.handleNotification(run, method, params),
         onRequest: (method, params, id) => void this.handleRequest(run, method, params, id),
+        onProtocolError: (error, chunk) =>
+          void this.safeAppendEvent(run.id, {
+            type: "codex.protocol_error",
+            message: error.message,
+            payload: { chunk }
+          }),
         onExit: (exitCode, signal) => {
           this.active.delete(run.id);
           void this.handleExit(run.id, exitCode, signal);

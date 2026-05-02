@@ -13,6 +13,7 @@ export interface CodexAppServerOptions {
   onStderr?(chunk: string): void;
   onNotification?(method: string, params: unknown): void;
   onRequest?(method: string, params: unknown, id: JsonRpcId): void;
+  onProtocolError?(error: Error, chunk: string): void;
   onExit?(exitCode: number | null, signal: NodeJS.Signals | null): void;
 }
 
@@ -36,7 +37,11 @@ export class CodexAppServerProcess {
     this.child.stdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       options.onStdout?.(text);
-      this.client.acceptChunk(text);
+      try {
+        this.client.acceptChunk(text);
+      } catch (error) {
+        options.onProtocolError?.(error as Error, text);
+      }
     });
     this.child.stderr.on("data", (chunk: Buffer) => options.onStderr?.(chunk.toString("utf8")));
     this.child.on("exit", (exitCode, signal) => options.onExit?.(exitCode, signal));
