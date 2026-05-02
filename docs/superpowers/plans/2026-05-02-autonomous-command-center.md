@@ -504,7 +504,7 @@ export class OrchestratorService {
       void this.tick().finally(() => {
         void this.options.readState().then((state) => {
           if (!state.paused) this.schedule(state.policy.pollIntervalSeconds);
-        });
+        }).catch((err) => console.error("Orchestrator failed to read state", err));
       });
     }, Math.max(seconds, 5) * 1000);
   }
