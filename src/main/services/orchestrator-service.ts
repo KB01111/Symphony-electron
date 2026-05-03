@@ -63,20 +63,90 @@ export class OrchestratorService {
   }
 
   async snapshot(): Promise<OrchestratorSnapshot> {
-    const state = await this.dependencies.readState();
+    const [state, candidates, runs] = await Promise.all([
+      this.dependencies.readState(),
+      this.dependencies.listCandidateTasks(),
+      this.dependencies.listRuns()
+    ]);
+    const runsById = new Map(runs.map((run) => [run.id, run]));
+    const now = this.now();
+    const activeRuns = runs.filter((run) => ACTIVE_RUN_STATES.has(run.state));
+    const launchedTaskIds = new Set(runs.map((run) => run.taskId));
+    const activeTaskIds = new Set(activeRuns.map((run) => run.taskId));
+    const claimedTaskIds = new Set(state.activeClaims.map((claim) => claim.taskId));
+    const terminalStateNames = new Set(state.policy.terminalStateNames.map(normalize));
+    const retryQueueByTaskId = new Map(state.retryQueue.map((entry) => [entry.taskId, entry]));
+    const queue: QueuedTask[] = [];
+
+    // Compute state concurrency from active claims and runs
+    const stateConcurrency = new Map<string, number>();
+    const claimedRunIds = new Set<string>();
+    for (const claim of state.activeClaims) {
+      const run = runsById.get(claim.runId);
+      if (!run || !ACTIVE_RUN_STATES.has(run.state)) continue;
+      claimedRunIds.add(claim.runId);
+      const task = candidates.find((c) => c.id === claim.taskId);
+      const stateKey = normalize(task?.status ?? run.state);
+      stateConcurrency.set(stateKey, (stateConcurrency.get(stateKey) ?? 0) + 1);
+    }
+    for (const run of activeRuns) {
+      if (!claimedRunIds.has(run.id)) {
+        const stateKey = normalize(run.state);
+        stateConcurrency.set(stateKey, (stateConcurrency.get(stateKey) ?? 0) + 1);
+      }
+    }
+
+    let activeCount = new Set([...activeTaskIds, ...claimedTaskIds]).size;
+
+    // Build queue by iterating over candidates with same filtering logic as runTick
+    for (const candidate of [...candidates].sort(compareCandidates)) {
+      if (claimedTaskIds.has(candidate.id) || activeTaskIds.has(candidate.id) || launchedTaskIds.has(candidate.id)) {
+        continue;
+      }
+
+      if (terminalStateNames.has(normalize(candidate.status))) {
+        // Skip - would be cleaned in tick(), not shown in queue
+        continue;
+      }
+
+      if (!passesBlockerGate(candidate, terminalStateNames)) {
+        queue.push(queueEntry(candidate, "blocked", "One or more blockers are not terminal."));
+        continue;
+      }
+
+      if (state.paused || !state.policy.autoStart) {
+        queue.push(queueEntry(candidate, state.paused ? "paused" : "policy_disabled", state.paused ? "Automation is paused." : "Auto-start is disabled."));
+        continue;
+      }
+
+      const retry = retryQueueByTaskId.get(candidate.id);
+      if (retry && new Date(retry.nextAttemptAt).getTime() > now.getTime()) {
+        queue.push(queueEntry(candidate, "retry", retry.lastError, retry.nextAttemptAt));
+        continue;
+      }
+
+      if (activeCount >= state.policy.maxConcurrentRuns) {
+        queue.push(queueEntry(candidate, "concurrency", `Global concurrency limit ${state.policy.maxConcurrentRuns} reached.`));
+        continue;
+      }
+
+      const stateKey = normalize(candidate.status);
+      const stateLimit = state.policy.maxConcurrentRunsByState[stateKey];
+      if (stateLimit !== undefined && (stateConcurrency.get(stateKey) ?? 0) >= stateLimit) {
+        queue.push(queueEntry(candidate, "state_concurrency", `State concurrency limit ${stateLimit} reached for ${candidate.status}.`));
+        continue;
+      }
+
+      // If we reach here, the task would be started in tick() - don't add to queue (it's shown as active/would be launched)
+    }
+
     return {
       state,
-      queuedTaskIds: [],
-      queue: [],
+      queuedTaskIds: queue.map((entry) => entry.taskId),
+      queue,
       activeRuns: state.activeClaims.map((claim) => ({ id: claim.runId, taskId: claim.taskId })),
-      activeMetrics: state.activeClaims.map((claim) => ({
-        id: claim.runId,
-        taskId: claim.taskId,
-        identifier: claim.identifier,
-        startedAt: claim.startedAt,
-        ...(claim.lastEventAt ? { lastEventAt: claim.lastEventAt } : {})
-      })),
-      ...(!state.paused ? { nextPollAt: new Date(this.now().getTime() + state.policy.pollIntervalSeconds * 1000).toISOString() } : {})
+      activeMetrics: buildActiveMetrics(state, runsById),
+      ...(!state.paused ? { nextPollAt: new Date(now.getTime() + state.policy.pollIntervalSeconds * 1000).toISOString() } : {})
     };
   }
 
