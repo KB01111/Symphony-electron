@@ -19,6 +19,7 @@ interface RunServiceOptions {
   approvals?: ApprovalService;
   proof?: ProofStore;
   onRunNeedsReview?(run: Run): Promise<void>;
+  shouldContinueRun?(run: Run, task: Task): Promise<boolean>;
   onLinearGraphql?(payload: { query: string; variables?: Record<string, unknown> }): Promise<unknown>;
   createCodexProcess?: CodexAppServerProcessFactory;
 }
@@ -26,6 +27,7 @@ interface RunServiceOptions {
 export class RunService {
   private readonly store: FileStateStore<Run[]>;
   private readonly active = new Map<string, CodexAppServerProcessLike>();
+  private readonly runContexts = new Map<string, { task: Task; prompt: string; cwd: string; maxTurns: number }>();
   private readonly approvalWaiters = new Map<string, { runId: string; resolve(response: unknown): void }>();
   private readonly notificationQueues = new Map<string, Promise<void>>();
 
@@ -61,15 +63,16 @@ export class RunService {
 
   async cancel(runId: string): Promise<Run> {
     const run = await this.get(runId);
-    const process = this.active.get(runId);
-    if (process?.pid) {
+    const activeProcess = this.active.get(runId);
+    if (activeProcess?.pid) {
       try {
-        await execFileAsync("taskkill", ["/PID", String(process.pid), "/T", "/F"], { windowsHide: true });
+        await execFileAsync("taskkill", ["/PID", String(activeProcess.pid), "/T", "/F"], { windowsHide: true });
       } catch {
-        process.close();
+        activeProcess.close();
       }
     }
     this.active.delete(runId);
+    this.runContexts.delete(runId);
     await this.cleanupApprovalWaitersForRun(runId);
     if (run.workspacePath) {
       await this.safeWorkspaceBeforeRemove(run.workspacePath);
@@ -145,6 +148,7 @@ export class RunService {
         command: workspace.runtime.command,
         approvalPolicy: workspace.runtime.approvalPolicy,
         sandbox: workspace.runtime.threadSandbox,
+        turnSandboxPolicy: workspace.runtime.turnSandboxPolicy,
         readTimeoutMs: workspace.runtime.readTimeoutMs,
         onStdout: (chunk) => void this.eventLog.append(run.id, { type: "codex.stdout", stream: "stdout", message: chunk }),
         onStderr: (chunk) => void this.eventLog.append(run.id, { type: "codex.stderr", stream: "stderr", message: chunk }),
@@ -167,6 +171,7 @@ export class RunService {
         }
       });
       this.active.set(run.id, process);
+      this.runContexts.set(run.id, { task, prompt: workspace.workflowPrompt, cwd: workspace.path, maxTurns: workspace.runtime.maxTurns });
       await this.patch(run.id, {
         ...running,
         ...(process.pid ? { pid: process.pid } : {}),
@@ -176,11 +181,13 @@ export class RunService {
       await this.patch(run.id, {
         threadId: started.threadId,
         turnId: started.turnId,
+        turnCount: 1,
         updatedAt: isoNow()
       });
     } catch (error) {
       this.active.get(run.id)?.close();
       this.active.delete(run.id);
+      this.runContexts.delete(run.id);
       await this.cleanupApprovalWaitersForRun(run.id);
       const failed = await this.get(run.id).catch(() => run);
       if (failed.workspacePath) {
@@ -203,6 +210,7 @@ export class RunService {
     if (run.workspacePath) {
       await this.safeWorkspaceAfterRun(run.workspacePath);
     }
+    this.runContexts.delete(runId);
     const failed = exitCode !== 0;
     await this.patch(runId, {
       state: failed ? "failed" : "review",
@@ -223,6 +231,20 @@ export class RunService {
   private async handleTurnCompleted(runId: string): Promise<void> {
     const run = await this.get(runId);
     if (run.state === "cancelled" || run.state === "done" || run.state === "failed" || run.state === "review") return;
+    const context = this.runContexts.get(runId);
+    const activeProcess = this.active.get(runId);
+    const nextTurnCount = (run.turnCount ?? 1) + 1;
+    if (context && activeProcess && run.threadId && nextTurnCount <= context.maxTurns && (await this.shouldContinue(run, context.task))) {
+      const prompt = continuePrompt(context.task, nextTurnCount, context.maxTurns);
+      const started = await activeProcess.continueTurn(run.threadId, prompt, context.cwd);
+      await this.patch(runId, {
+        turnId: started.turnId,
+        turnCount: nextTurnCount,
+        updatedAt: isoNow()
+      });
+      await this.eventLog.append(runId, { type: "run.turn_continued", message: `Started Codex turn ${nextTurnCount} of ${context.maxTurns}.` });
+      return;
+    }
     await this.addProof(runId, {
       kind: "summary",
       label: "Codex turn completed",
@@ -241,6 +263,7 @@ export class RunService {
     await this.options.onRunNeedsReview?.(reviewed);
     const process = this.active.get(runId);
     this.active.delete(runId);
+    this.runContexts.delete(runId);
     await this.cleanupApprovalWaitersForRun(runId);
     process?.close();
   }
@@ -332,6 +355,7 @@ export class RunService {
 
   private async handleCodexNotification(runId: string, method: string, params: unknown): Promise<void> {
     await this.eventLog.append(runId, { type: `codex.${method}`, payload: params });
+    await this.patchCodexMetrics(runId, method, params);
     const lowerMethod = method.toLowerCase();
     if (lowerMethod.includes("tokenusage")) {
       await this.addProof(runId, {
@@ -393,6 +417,21 @@ export class RunService {
     } catch {
       // Cleanup hooks must not block explicit cancellation.
     }
+  }
+
+  private async shouldContinue(run: Run, task: Task): Promise<boolean> {
+    return this.options.shouldContinueRun ? this.options.shouldContinueRun(run, task) : false;
+  }
+
+  private async patchCodexMetrics(runId: string, method: string, params: unknown): Promise<void> {
+    const tokenUsage = extractTokenUsage(params);
+    await this.patch(runId, {
+      lastCodexEvent: method,
+      ...(typeof params === "string" ? { lastCodexMessage: params.slice(0, 500) } : {}),
+      ...(tokenUsage.inputTokens !== undefined ? { inputTokens: tokenUsage.inputTokens } : {}),
+      ...(tokenUsage.outputTokens !== undefined ? { outputTokens: tokenUsage.outputTokens } : {}),
+      ...(tokenUsage.totalTokens !== undefined ? { totalTokens: tokenUsage.totalTokens } : {})
+    });
   }
 
   private async cleanupApprovalWaitersForRun(runId: string): Promise<void> {
@@ -464,6 +503,35 @@ function approvalTitle(kind: ApprovalRequest["kind"]): string {
 
 function stringifyApprovalDetail(params: unknown): string {
   return (JSON.stringify(params, null, 2) ?? "").slice(0, 4000);
+}
+
+function continuePrompt(task: Task, turnCount: number, maxTurns: number): string {
+  return [
+    `Continue work on ${task.identifier}: ${task.title}.`,
+    `This is autonomous turn ${turnCount} of ${maxTurns}.`,
+    "If the issue is fully resolved, summarize proof and stop; otherwise continue implementation and verification."
+  ].join("\n");
+}
+
+function extractTokenUsage(value: unknown): { inputTokens?: number; outputTokens?: number; totalTokens?: number } {
+  if (!isRecord(value)) return {};
+  const usage = isRecord(value.usage) ? value.usage : value;
+  const inputTokens = numberValue(usage.input_tokens ?? usage.inputTokens ?? usage.prompt_tokens ?? usage.promptTokens);
+  const outputTokens = numberValue(usage.output_tokens ?? usage.outputTokens ?? usage.completion_tokens ?? usage.completionTokens);
+  const totalTokens = numberValue(usage.total_tokens ?? usage.totalTokens);
+  return {
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(totalTokens !== undefined ? { totalTokens } : inputTokens !== undefined || outputTokens !== undefined ? { totalTokens: (inputTokens ?? 0) + (outputTokens ?? 0) } : {})
+  };
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 /**

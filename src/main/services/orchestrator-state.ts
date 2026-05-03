@@ -4,8 +4,15 @@ import { FileStateStore } from "./file-state.js";
 
 export const defaultAutomationPolicy: AutomationPolicy = {
   autoStart: true,
+  autoTransitionInProgress: false,
   autoCreateHandoff: true,
   autoWriteTrackerUpdates: false,
+  autoCreatePr: false,
+  autoUpdatePr: false,
+  autoMerge: false,
+  requireApprovalForLanding: true,
+  trustedEnvironment: false,
+  allowedRepositories: [],
   maxConcurrentRuns: 2,
   maxConcurrentRunsByState: {},
   pollIntervalSeconds: 60,
@@ -30,7 +37,8 @@ function cloneAutomationPolicy(policy: AutomationPolicy): AutomationPolicy {
     ...policy,
     terminalStateNames: [...policy.terminalStateNames],
     maxConcurrentRunsByState: { ...policy.maxConcurrentRunsByState },
-    requireApprovalFor: [...policy.requireApprovalFor]
+    requireApprovalFor: [...policy.requireApprovalFor],
+    allowedRepositories: [...policy.allowedRepositories]
   };
 }
 

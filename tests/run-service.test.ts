@@ -115,6 +115,7 @@ test("cancelled runs resolve pending approval waiters and deny persisted approva
           });
         return { threadId: "thread-1", turnId: "turn-1" };
       },
+      continueTurn: async () => ({ threadId: "thread-1", turnId: "turn-2" }),
       close: vi.fn()
     })
   });
@@ -270,6 +271,7 @@ test("records proof from Codex notifications and marks completed turns for revie
         options.onNotification?.("turn/completed", { turn: { id: "turn-1" } });
         return { threadId: "thread-1", turnId: "turn-1" };
       },
+      continueTurn: async () => ({ threadId: "thread-1", turnId: "turn-2" }),
       close: vi.fn()
     })
   });
@@ -309,6 +311,7 @@ test("records inferred proof kinds from method names including test, ci, diff, a
         options.onNotification?.("turn/completed", { turn: { id: "turn-1" } });
         return { threadId: "thread-1", turnId: "turn-1" };
       },
+      continueTurn: async () => ({ threadId: "thread-1", turnId: "turn-2" }),
       close: vi.fn()
     })
   });
@@ -321,4 +324,41 @@ test("records inferred proof kinds from method names including test, ci, diff, a
   expect(kinds).toContain("test");
   expect(kinds).toContain("ci");
   expect(kinds).toContain("diff");
+});
+
+test("continues Codex turns while tracker issue remains active", async () => {
+  const root = await tempRoot();
+  await writeFile(path.join(root, "WORKFLOW.md"), "---\nagent:\n  max_turns: 2\n---\nHandle {{identifier}}", "utf8");
+  const turnIds: string[] = [];
+  let completion: ((params?: unknown) => void) | undefined;
+  let continueCompletion: ((params?: unknown) => void) | undefined;
+  const service = new RunService(root, new JsonlEventLog(path.join(root, "logs")), new WorkspaceManager({ workflowPath: path.join(root, "WORKFLOW.md") }), {
+    shouldContinueRun: async () => true,
+    createCodexProcess: (options) => ({
+      get pid() {
+        return undefined;
+      },
+      startTurn: async () => {
+        turnIds.push("turn-1");
+        completion = (params?: unknown) => options.onNotification?.("turn/completed", params ?? { turn: { id: "turn-1" } });
+        return { threadId: "thread-1", turnId: "turn-1" };
+      },
+      continueTurn: async () => {
+        turnIds.push("turn-2");
+        continueCompletion = (params?: unknown) => options.onNotification?.("turn/completed", params ?? { turn: { id: "turn-2" } });
+        return { threadId: "thread-1", turnId: "turn-2" };
+      },
+      close: vi.fn()
+    })
+  });
+
+  const run = await service.start(task(), profile(root));
+  await vi.waitFor(() => expect(completion).toBeDefined());
+  completion?.();
+  await vi.waitFor(() => expect(continueCompletion).toBeDefined());
+  continueCompletion?.();
+  await vi.waitFor(async () => expect((await service.get(run.id)).state).toBe("review"));
+
+  expect(turnIds).toEqual(["turn-1", "turn-2"]);
+  expect(await service.get(run.id)).toMatchObject({ turnCount: 2, turnId: "turn-2", state: "review" });
 });

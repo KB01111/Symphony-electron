@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { CreateProfileInput, LinearConfig, RunEvent, RunTranscriptItem, SchedulerSnapshot, SymphonyApi, Task } from "../shared/types.js";
+import type { CreateIssueInput, CreateProfileInput, LinearConfig, RunEvent, RunTranscriptItem, SchedulerSnapshot, SymphonyApi, Task } from "../shared/types.js";
 
 function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
   return ipcRenderer.invoke(channel, ...args) as Promise<T>;
@@ -20,7 +20,8 @@ const api: SymphonyApi = {
     listIssues: (config?: LinearConfig) => invoke("linear:listIssues", config),
     syncNow: () => invoke("linear:syncNow"),
     transitionIssue: (issueId: string, stateName: string) => invoke("linear:transitionIssue", issueId, stateName),
-    addComment: (issueId: string, body: string) => invoke("linear:addComment", issueId, body)
+    addComment: (issueId: string, body: string) => invoke("linear:addComment", issueId, body),
+    createIssue: (input: CreateIssueInput) => invoke("linear:createIssue", input)
   },
   workflow: {
     snapshot: () => invoke("workflow:snapshot"),
@@ -57,10 +58,17 @@ const api: SymphonyApi = {
     updatePolicy: (policy) => invoke("orchestrator:updatePolicy", policy)
   },
   proof: {
-    list: (runId: string) => invoke("proof:list", runId)
+    list: (runId: string) => invoke("proof:list", runId),
+    listAll: () => invoke("proof:listAll")
   },
   handoff: {
     build: (runId: string) => invoke("handoff:build", runId)
+  },
+  github: {
+    status: (runId: string) => invoke("github:status", runId)
+  },
+  landing: {
+    approve: (runId: string, reason?: string) => invoke("landing:approve", runId, reason)
   },
   logs: {
     tail: (runId: string) => invoke("logs:tail", runId),

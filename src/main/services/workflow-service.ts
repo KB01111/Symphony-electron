@@ -44,6 +44,28 @@ export interface WorkflowConfig {
     readTimeoutMs: number;
     stallTimeoutMs: number;
   };
+  github: {
+    repositoryUrl?: string;
+    defaultBranch: string;
+  };
+  writeback: {
+    autoCreatePr: boolean;
+    autoUpdatePr: boolean;
+    autoMerge: boolean;
+    autoTransitionInProgress: boolean;
+    autoWriteTrackerUpdates: boolean;
+    humanReviewStateName: string;
+  };
+  proof: {
+    requireCi: boolean;
+    requireReview: boolean;
+    requireWalkthrough: boolean;
+  };
+  trust: {
+    trustedEnvironment: boolean;
+    requireApprovalForLanding: boolean;
+    allowedRepositories: string[];
+  };
 }
 
 export interface LoadedWorkflow {
@@ -117,8 +139,12 @@ export class WorkflowService {
       validation: loaded.validation,
       pollIntervalSeconds: Math.round(loaded.config.polling.intervalMs / 1000),
       maxConcurrentRuns: loaded.config.agent.maxConcurrentAgents,
+      maxTurns: loaded.config.agent.maxTurns,
       activeStateNames: loaded.config.tracker.activeStateNames,
-      terminalStateNames: loaded.config.tracker.terminalStateNames
+      terminalStateNames: loaded.config.tracker.terminalStateNames,
+      ...(loaded.config.github.repositoryUrl ? { repositoryUrl: loaded.config.github.repositoryUrl } : {}),
+      autoCreatePr: loaded.config.writeback.autoCreatePr,
+      autoMerge: loaded.config.writeback.autoMerge
     };
   }
 
@@ -173,11 +199,16 @@ function normalizeWorkflowConfig(config: RawMap, baseDir: string, env: NodeJS.Pr
   const hooksRaw = objectValue(config.hooks, "hooks", errors);
   const agentRaw = objectValue(config.agent, "agent", errors);
   const codexRaw = objectValue(config.codex, "codex", errors);
+  const githubRaw = objectValue(config.github, "github", errors);
+  const writebackRaw = objectValue(config.writeback, "writeback", errors);
+  const proofRaw = objectValue(config.proof, "proof", errors);
+  const trustRaw = objectValue(config.trust, "trust", errors);
 
   const apiKeyRaw = stringValue(trackerRaw.api_key) || stringValue(trackerRaw.apiKey) || "$LINEAR_API_KEY";
   const apiKey = resolveEnvReference(apiKeyRaw, env);
   const workspaceRootRaw = stringValue(workspaceRaw.root) || defaults.workspace.root;
   const projectSlug = stringValue(trackerRaw.project_slug) || stringValue(trackerRaw.projectSlug);
+  const repositoryUrl = stringValue(githubRaw.repository_url) || stringValue(githubRaw.repositoryUrl) || stringValue(trackerRaw.repository_url) || stringValue(trackerRaw.repositoryUrl);
   const hooks: WorkflowConfig["hooks"] = {
     timeoutMs: positiveInteger(hooksRaw.timeout_ms, defaults.hooks.timeoutMs)
   };
@@ -216,12 +247,34 @@ function normalizeWorkflowConfig(config: RawMap, baseDir: string, env: NodeJS.Pr
       },
       codex: {
         command: stringValue(codexRaw.command) || defaults.codex.command,
-        approvalPolicy: codexRaw.approval_policy,
+        approvalPolicy: codexRaw.approval_policy ?? codexRaw.approvalPolicy ?? defaults.codex.approvalPolicy,
         threadSandbox: codexRaw.thread_sandbox,
         turnSandboxPolicy: codexRaw.turn_sandbox_policy,
         turnTimeoutMs: positiveInteger(codexRaw.turn_timeout_ms, defaults.codex.turnTimeoutMs),
         readTimeoutMs: positiveInteger(codexRaw.read_timeout_ms, defaults.codex.readTimeoutMs),
         stallTimeoutMs: positiveInteger(codexRaw.stall_timeout_ms, defaults.codex.stallTimeoutMs)
+      },
+      github: {
+        ...(repositoryUrl ? { repositoryUrl } : {}),
+        defaultBranch: stringValue(githubRaw.default_branch) || stringValue(githubRaw.defaultBranch) || defaults.github.defaultBranch
+      },
+      writeback: {
+        autoCreatePr: booleanValue(writebackRaw.auto_create_pr ?? writebackRaw.autoCreatePr, defaults.writeback.autoCreatePr),
+        autoUpdatePr: booleanValue(writebackRaw.auto_update_pr ?? writebackRaw.autoUpdatePr, defaults.writeback.autoUpdatePr),
+        autoMerge: booleanValue(writebackRaw.auto_merge ?? writebackRaw.autoMerge, defaults.writeback.autoMerge),
+        autoTransitionInProgress: booleanValue(writebackRaw.auto_transition_in_progress ?? writebackRaw.autoTransitionInProgress, defaults.writeback.autoTransitionInProgress),
+        autoWriteTrackerUpdates: booleanValue(writebackRaw.auto_write_tracker_updates ?? writebackRaw.autoWriteTrackerUpdates, defaults.writeback.autoWriteTrackerUpdates),
+        humanReviewStateName: stringValue(writebackRaw.human_review_state) || stringValue(writebackRaw.humanReviewStateName) || defaults.writeback.humanReviewStateName
+      },
+      proof: {
+        requireCi: booleanValue(proofRaw.require_ci ?? proofRaw.requireCi, defaults.proof.requireCi),
+        requireReview: booleanValue(proofRaw.require_review ?? proofRaw.requireReview, defaults.proof.requireReview),
+        requireWalkthrough: booleanValue(proofRaw.require_walkthrough ?? proofRaw.requireWalkthrough, defaults.proof.requireWalkthrough)
+      },
+      trust: {
+        trustedEnvironment: booleanValue(trustRaw.trusted_environment ?? trustRaw.trustedEnvironment, defaults.trust.trustedEnvironment),
+        requireApprovalForLanding: booleanValue(trustRaw.require_approval_for_landing ?? trustRaw.requireApprovalForLanding, defaults.trust.requireApprovalForLanding),
+        allowedRepositories: stringArray(trustRaw.allowed_repositories ?? trustRaw.allowedRepositories, defaults.trust.allowedRepositories)
       }
     }
   };
@@ -253,9 +306,39 @@ function defaultWorkflowConfig(baseDir: string, env: NodeJS.ProcessEnv): Workflo
     },
     codex: {
       command: "codex app-server",
+      approvalPolicy: {
+        granular: {
+          sandbox_approval: true,
+          rules: true,
+          skill_approval: true,
+          request_permissions: true,
+          mcp_elicitations: true
+        }
+      },
       turnTimeoutMs: 3_600_000,
       readTimeoutMs: 5_000,
       stallTimeoutMs: 300_000
+    },
+    github: {
+      defaultBranch: "main"
+    },
+    writeback: {
+      autoCreatePr: false,
+      autoUpdatePr: false,
+      autoMerge: false,
+      autoTransitionInProgress: false,
+      autoWriteTrackerUpdates: false,
+      humanReviewStateName: "Human Review"
+    },
+    proof: {
+      requireCi: false,
+      requireReview: false,
+      requireWalkthrough: false
+    },
+    trust: {
+      trustedEnvironment: false,
+      requireApprovalForLanding: true,
+      allowedRepositories: []
     }
   };
 }
@@ -286,6 +369,16 @@ function stringArray(value: unknown, fallback: string[]): string[] {
 function positiveInteger(value: unknown, fallback: number): number {
   const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
   return Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : fallback;
+}
+
+function booleanValue(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+  }
+  return fallback;
 }
 
 function positiveIntegerMap(value: unknown): Record<string, number> {

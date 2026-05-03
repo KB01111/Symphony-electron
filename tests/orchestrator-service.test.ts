@@ -79,6 +79,60 @@ test("does not dispatch while paused", async () => {
 
   expect(startRun).not.toHaveBeenCalled();
   expect(snapshot.queuedTaskIds).toEqual(["a"]);
+  expect(snapshot.queue).toMatchObject([{ taskId: "a", reason: "paused" }]);
+});
+
+test("reports queue reasons for blockers and concurrency", async () => {
+  let state: OrchestratorState = { ...defaultOrchestratorState(), policy: { ...defaultOrchestratorState().policy, maxConcurrentRuns: 1 } };
+  const service = new OrchestratorService({
+    readState: async () => state,
+    writeState: async (next) => {
+      state = next;
+    },
+    listCandidateTasks: async () => [task("active"), todoTask("blocked"), task("queued")],
+    listRuns: async () => [],
+    startRun: async (candidate) => run(`run-${candidate.id}`, candidate.id),
+    appendEvent: async () => undefined,
+    now: () => new Date("2026-05-02T10:00:00.000Z")
+  });
+
+  const snapshot = await service.tick();
+
+  expect(snapshot.state.activeClaims.map((claim) => claim.taskId)).toEqual(["active"]);
+  expect(snapshot.queue).toEqual([
+    expect.objectContaining({ taskId: "blocked", reason: "blocked" }),
+    expect.objectContaining({ taskId: "queued", reason: "concurrency" })
+  ]);
+  expect(snapshot.nextPollAt).toBe("2026-05-02T10:01:00.000Z");
+});
+
+test("reconciles tracker terminal state and cleans workspaces", async () => {
+  const cleaned: string[] = [];
+  let state: OrchestratorState = {
+    ...defaultOrchestratorState(),
+    activeClaims: [{ taskId: "a", runId: "run-a", identifier: "A", startedAt: "2026-05-02T10:00:00.000Z" }]
+  };
+  const service = new OrchestratorService({
+    readState: async () => state,
+    writeState: async (next) => {
+      state = next;
+    },
+    listCandidateTasks: async () => [task("a")],
+    getIssueState: async () => ({ status: "Done" }),
+    listRuns: async () => [run("run-a", "a", "running")],
+    startRun: async (candidate) => run(`run-${candidate.id}`, candidate.id),
+    appendEvent: async () => undefined,
+    terminateRun: async () => undefined,
+    cleanWorkspace: async (candidate) => {
+      cleaned.push(candidate.id);
+    },
+    now: () => new Date("2026-05-02T10:00:00.000Z")
+  });
+
+  const snapshot = await service.tick();
+
+  expect(snapshot.state.activeClaims).toEqual([]);
+  expect(cleaned).toEqual(["a"]);
 });
 
 test("existing active and preparing runs consume concurrency", async () => {

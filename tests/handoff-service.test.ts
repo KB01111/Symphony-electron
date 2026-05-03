@@ -148,3 +148,20 @@ test("formats multiple proof entries with their respective statuses", () => {
   // Should not contain the fallback
   expect(handoff.body).not.toContain("No proof entries were recorded.");
 });
+
+test("includes PR, complexity, walkthrough, and landing metadata", () => {
+  const proof: ProofEntry[] = [
+    { id: "p1", runId: "run-1", kind: "pr", label: "Pull request", status: "passed", detail: "opened", url: "https://github.com/acme/widgets/pull/1", createdAt: "2026-05-02T10:00:00.000Z" },
+    { id: "p2", runId: "run-1", kind: "complexity", label: "Complexity", status: "warning", detail: "Medium", createdAt: "2026-05-02T10:00:00.000Z" },
+    { id: "p3", runId: "run-1", kind: "walkthrough_video", label: "Walkthrough", status: "passed", detail: "Recorded", url: "https://videos.example.test/1", createdAt: "2026-05-02T10:00:00.000Z" }
+  ];
+
+  const handoff = new HandoffService(() => "2026-05-02T10:31:00.000Z").build({ task: { ...task(), branchName: "devin/eng-42" }, run: run(), proof });
+
+  expect(handoff.prUrl).toBe("https://github.com/acme/widgets/pull/1");
+  expect(handoff.branchName).toBe("devin/eng-42");
+  expect(handoff.landingAllowed).toBe(true);
+  expect(handoff.body).toContain("Complexity: Medium");
+  expect(handoff.body).toContain("Walkthrough: https://videos.example.test/1");
+  expect(handoff.body).toContain("Land only after explicit operator acceptance");
+});

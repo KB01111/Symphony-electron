@@ -72,6 +72,7 @@ test("normalizes Linear issues into local tasks", async () => {
         {
           id: "lin-0",
           identifier: "ENG-1",
+          relationType: "blocks",
           state: "Done",
           createdAt: "2026-04-30T10:00:00.000Z",
           updatedAt: "2026-05-01T09:00:00.000Z"
@@ -180,4 +181,3 @@ test("caches workflow states for repeated transitions", async () => {
 
   expect(stateFetches).toBe(1);
 });
-
