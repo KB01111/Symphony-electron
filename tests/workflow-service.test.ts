@@ -126,6 +126,7 @@ test("normalizes upstream-style GitHub, writeback, proof, and trust config", asy
 
   const loaded = await new WorkflowService(workflowPath, {}).load();
 
+  expect(loaded.validation.ok).toBe(true);
   expect(loaded.config.github).toMatchObject({ repositoryUrl: "https://github.com/acme/widgets", defaultBranch: "trunk" });
   expect(loaded.config.writeback).toMatchObject({ autoCreatePr: true, autoUpdatePr: true, humanReviewStateName: "Review" });
   expect(loaded.config.proof.requireCi).toBe(true);

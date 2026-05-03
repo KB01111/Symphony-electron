@@ -76,7 +76,7 @@ export class OrchestratorService {
         startedAt: claim.startedAt,
         ...(claim.lastEventAt ? { lastEventAt: claim.lastEventAt } : {})
       })),
-      ...(!state.paused ? { nextPollAt: new Date(Date.now() + state.policy.pollIntervalSeconds * 1000).toISOString() } : {})
+      ...(!state.paused ? { nextPollAt: new Date(this.now().getTime() + state.policy.pollIntervalSeconds * 1000).toISOString() } : {})
     };
   }
 
