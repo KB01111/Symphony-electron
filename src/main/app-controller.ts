@@ -99,7 +99,7 @@ export class AppController {
       terminateRun: (runId) => this.runs.cancel(runId),
       cleanWorkspace: async (task) => {
         const runs = await this.runs.list();
-        const run = runs.find((candidate) => candidate.taskId === task.id && candidate.workspacePath);
+        const run = latestRunWithWorkspace(runs, task.id);
         if (run?.workspacePath) {
           await new WorkspaceManager({ workflow: this.workflow }).beforeRemove(run.workspacePath);
         }
@@ -346,7 +346,13 @@ function orchestratorSnapshotToSchedulerSnapshot(snapshot: Awaited<ReturnType<Or
   };
 }
 
-function githubConfigForTask(task: Task): GitHubConfig | undefined {
+export function latestRunWithWorkspace(runs: Run[], taskId: string): Run | undefined {
+  return runs
+    .filter((run) => run.taskId === taskId && run.workspacePath && run.state !== "cancelled" && run.state !== "failed")
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+}
+
+export function githubConfigForTask(task: Task): GitHubConfig | undefined {
   const repositoryUrl = task.repositoryUrl ?? inferRepositoryUrl(task.description);
   if (!repositoryUrl) return undefined;
   const match = repositoryUrl.match(/github\.com[:/](?<owner>[^/\s]+)\/(?<repo>[^/\s]+)(?:\.git)?/u);
@@ -361,7 +367,8 @@ function githubConfigForTask(task: Task): GitHubConfig | undefined {
   };
 }
 
-function inferRepositoryUrl(text: string): string | undefined {
+function inferRepositoryUrl(text: string | undefined): string | undefined {
+  if (!text) return undefined;
   const match = text.match(/https?:\/\/github\.com\/[^\s/]+\/[^\s)]+/u);
   return match?.[0]?.replace(/\/pull\/\d+.*/u, "");
 }

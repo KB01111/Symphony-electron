@@ -153,7 +153,7 @@ test("formats multiple proof entries with their respective statuses", () => {
 test("includes PR, complexity, walkthrough, and landing metadata", () => {
   const proof: ProofEntry[] = [
     { id: "p1", runId: "run-1", kind: "pr", label: "Pull request", status: "passed", detail: "opened", url: "https://github.com/acme/widgets/pull/1", createdAt: "2026-05-02T10:00:00.000Z" },
-    { id: "p2", runId: "run-1", kind: "complexity", label: "Complexity", status: "warning", detail: "Medium", createdAt: "2026-05-02T10:00:00.000Z" },
+    { id: "p2", runId: "run-1", kind: "complexity", label: "Complexity", status: "passed", detail: "Medium", createdAt: "2026-05-02T10:00:00.000Z" },
     { id: "p3", runId: "run-1", kind: "walkthrough_video", label: "Walkthrough", status: "passed", detail: "Recorded", url: "https://videos.example.test/1", createdAt: "2026-05-02T10:00:00.000Z" }
   ];
 
@@ -175,6 +175,16 @@ test("does not allow landing when any proof failed", () => {
       { id: "p1", runId: "run-1", kind: "test", label: "unit tests", status: "passed", detail: "10 passed", createdAt: "2026-05-02T10:00:00.000Z" },
       { id: "p2", runId: "run-1", kind: "ci", label: "CI pipeline", status: "failed", detail: "build failed", createdAt: "2026-05-02T10:01:00.000Z" }
     ]
+  });
+
+  expect(handoff.landingAllowed).toBe(false);
+});
+
+test("does not allow landing for incomplete proof statuses", () => {
+  const handoff = new HandoffService().build({
+    task: task(),
+    run: run(),
+    proof: [{ id: "p1", runId: "run-1", kind: "ci", label: "CI pipeline", status: "unknown", detail: "pending", createdAt: "2026-05-02T10:01:00.000Z" }]
   });
 
   expect(handoff.landingAllowed).toBe(false);

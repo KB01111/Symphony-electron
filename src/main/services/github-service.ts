@@ -124,6 +124,7 @@ export class GitHubService {
 }
 
 function inferPullRequestUrl(task: Task): string | undefined {
+  if (!task.description) return undefined;
   const match = task.description.match(/https?:\/\/\S+\/pull\/\d+/u);
   return match?.[0];
 }

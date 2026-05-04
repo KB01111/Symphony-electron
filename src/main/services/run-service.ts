@@ -156,6 +156,7 @@ export class RunService {
           const handled = this.enqueueNotification(run.id, () => this.handleCodexNotification(run.id, method, params));
           if (method === "turn/completed") {
             void handled
+              .catch((error) => this.safeAppendEvent(run.id, { type: "codex.notification_failed", message: errorMessage(error) }))
               .then(() => this.handleTurnCompleted(run.id))
               .catch((error) => this.failRun(run.id, error));
           }
@@ -398,11 +399,18 @@ export class RunService {
     const next = current.then(operation, operation);
     this.notificationQueues.set(
       runId,
-      next.finally(() => {
-        if (this.notificationQueues.get(runId) === next) {
-          this.notificationQueues.delete(runId);
+      next.then(
+        () => {
+          if (this.notificationQueues.get(runId) === next) {
+            this.notificationQueues.delete(runId);
+          }
+        },
+        () => {
+          if (this.notificationQueues.get(runId) === next) {
+            this.notificationQueues.delete(runId);
+          }
         }
-      })
+      )
     );
     return next;
   }

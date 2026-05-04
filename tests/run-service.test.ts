@@ -392,3 +392,37 @@ test("marks the run failed when continuing a turn fails", async () => {
   await vi.waitFor(async () => expect(await service.get(run.id)).toMatchObject({ state: "failed", failureReason: "network unavailable" }));
   expect(close).toHaveBeenCalled();
 });
+
+test("continues completed turns even when notification recording fails", async () => {
+  const root = await tempRoot();
+  await writeFile(path.join(root, "WORKFLOW.md"), "---\nagent:\n  max_turns: 2\n---\nHandle {{identifier}}", "utf8");
+  let completion: (() => void) | undefined;
+  const eventLog = new JsonlEventLog(path.join(root, "logs"));
+  const append = vi.spyOn(eventLog, "append");
+  append.mockImplementation(async (runId, input) => {
+    if (input.type === "codex.turn/completed") {
+      throw new Error("event log unavailable");
+    }
+    return Reflect.apply(JsonlEventLog.prototype.append, eventLog, [runId, input]);
+  });
+  const service = new RunService(root, eventLog, new WorkspaceManager({ workflowPath: path.join(root, "WORKFLOW.md") }), {
+    shouldContinueRun: async () => false,
+    createCodexProcess: (options) => ({
+      get pid() {
+        return undefined;
+      },
+      startTurn: async () => {
+        completion = () => options.onNotification?.("turn/completed", { turn: { id: "turn-1" } });
+        return { threadId: "thread-1", turnId: "turn-1" };
+      },
+      continueTurn: async () => ({ threadId: "thread-1", turnId: "turn-2" }),
+      close: vi.fn()
+    })
+  });
+
+  const run = await service.start(task(), profile(root));
+  await vi.waitFor(() => expect(completion).toBeDefined());
+  completion?.();
+
+  await vi.waitFor(async () => expect(await service.get(run.id)).toMatchObject({ state: "review" }));
+});

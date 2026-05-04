@@ -322,15 +322,14 @@ export class LinearClient {
   private normalizeIssue(node: LinearIssueNode, config: LinearConfig): Task {
     const blockers = (node.relations?.nodes ?? [])
       .filter((relation) => relation.type === "blocks" || relation.type === "blocked")
-      .map((relation) => relation.relatedIssue)
-      .filter((relatedIssue): relatedIssue is NonNullable<typeof relatedIssue> => Boolean(relatedIssue))
-      .map((relatedIssue) => ({
-        ...(relatedIssue.id ? { id: relatedIssue.id } : {}),
-        ...(relatedIssue.identifier ? { identifier: relatedIssue.identifier } : {}),
-        ...(relatedIssue.state?.name ? { state: relatedIssue.state.name } : {}),
-        relationType: "blocks",
-        ...(relatedIssue.createdAt ? { createdAt: relatedIssue.createdAt } : {}),
-        ...(relatedIssue.updatedAt ? { updatedAt: relatedIssue.updatedAt } : {})
+      .filter((relation): relation is typeof relation & { relatedIssue: NonNullable<typeof relation.relatedIssue> } => Boolean(relation.relatedIssue))
+      .map((relation) => ({
+        ...(relation.relatedIssue.id ? { id: relation.relatedIssue.id } : {}),
+        ...(relation.relatedIssue.identifier ? { identifier: relation.relatedIssue.identifier } : {}),
+        ...(relation.relatedIssue.state?.name ? { state: relation.relatedIssue.state.name } : {}),
+        ...(relation.type ? { relationType: relation.type } : {}),
+        ...(relation.relatedIssue.createdAt ? { createdAt: relation.relatedIssue.createdAt } : {}),
+        ...(relation.relatedIssue.updatedAt ? { updatedAt: relation.relatedIssue.updatedAt } : {})
       }));
     const task: Task = {
       id: `linear:${node.id}`,
