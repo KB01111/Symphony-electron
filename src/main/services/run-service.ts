@@ -30,6 +30,7 @@ export class RunService {
   private readonly runContexts = new Map<string, { task: Task; prompt: string; cwd: string; maxTurns: number }>();
   private readonly approvalWaiters = new Map<string, { runId: string; resolve(response: unknown): void }>();
   private readonly notificationQueues = new Map<string, Promise<void>>();
+  private readonly terminating = new Set<string>();
 
   constructor(
     appDataRoot: string,
@@ -62,12 +63,25 @@ export class RunService {
   }
 
   async cancel(runId: string): Promise<Run> {
+    if (this.terminating.has(runId)) {
+      return await this.get(runId);
+    }
+    this.terminating.add(runId);
+
     const run = await this.get(runId);
+    const cancelled = await this.patch(runId, { state: "cancelled", completedAt: isoNow() });
+
     const activeProcess = this.active.get(runId);
-    if (activeProcess?.pid) {
-      try {
-        await execFileAsync("taskkill", ["/PID", String(activeProcess.pid), "/T", "/F"], { windowsHide: true });
-      } catch {
+    if (activeProcess) {
+      if (activeProcess.pid) {
+        try {
+          await execFileAsync("taskkill", ["/PID", String(activeProcess.pid), "/T", "/F"], { windowsHide: true });
+        } catch {
+          // taskkill failed, but we still need to close
+        } finally {
+          activeProcess.close();
+        }
+      } else {
         activeProcess.close();
       }
     }
@@ -77,8 +91,8 @@ export class RunService {
     if (run.workspacePath) {
       await this.safeWorkspaceBeforeRemove(run.workspacePath);
     }
-    const cancelled = await this.patch(runId, { state: "cancelled", completedAt: isoNow() });
     await this.eventLog.append(runId, { type: "run.cancelled", message: "Run cancelled by operator." });
+    this.terminating.delete(runId);
     return cancelled;
   }
 
@@ -193,33 +207,44 @@ export class RunService {
   }
 
   private async failRun(runId: string, error: unknown, fallbackRun?: Run): Promise<void> {
+    if (this.terminating.has(runId)) return;
+    this.terminating.add(runId);
+
     const message = errorMessage(error);
-    this.active.get(runId)?.close();
-    this.active.delete(runId);
-    this.runContexts.delete(runId);
-    await this.cleanupApprovalWaitersForRun(runId);
     const failed = await this.get(runId).catch(() => fallbackRun);
-    if (failed?.state === "cancelled" || failed?.state === "done" || failed?.state === "failed" || failed?.state === "review") return;
-    if (failed?.workspacePath) {
-      await this.safeWorkspaceAfterRun(failed.workspacePath);
+    if (failed?.state === "cancelled" || failed?.state === "done" || failed?.state === "failed" || failed?.state === "review") {
+      this.terminating.delete(runId);
+      return;
     }
+
     await this.patch(runId, {
       state: "failed",
       completedAt: isoNow(),
       failureReason: message,
       updatedAt: isoNow()
     });
+
+    this.active.get(runId)?.close();
+    this.active.delete(runId);
+    this.runContexts.delete(runId);
+    await this.cleanupApprovalWaitersForRun(runId);
+    if (failed?.workspacePath) {
+      await this.safeWorkspaceAfterRun(failed.workspacePath);
+    }
     await this.eventLog.append(runId, { type: "run.failed", message });
+    this.terminating.delete(runId);
   }
 
   private async handleExit(runId: string, exitCode: number | null, signal: NodeJS.Signals | null): Promise<void> {
+    if (this.terminating.has(runId)) return;
+    this.terminating.add(runId);
+
     const run = await this.get(runId);
-    if (run.state === "cancelled" || run.state === "done" || run.state === "failed" || run.state === "review") return;
-    await this.cleanupApprovalWaitersForRun(runId);
-    if (run.workspacePath) {
-      await this.safeWorkspaceAfterRun(run.workspacePath);
+    if (run.state === "cancelled" || run.state === "done" || run.state === "failed" || run.state === "review") {
+      this.terminating.delete(runId);
+      return;
     }
-    this.runContexts.delete(runId);
+
     const failed = exitCode !== 0;
     await this.patch(runId, {
       state: failed ? "failed" : "review",
@@ -227,6 +252,13 @@ export class RunService {
       ...(failed ? { failureReason: `Codex app-server exited with code ${String(exitCode)} signal ${String(signal)}.` } : {}),
       updatedAt: isoNow()
     });
+
+    await this.cleanupApprovalWaitersForRun(runId);
+    if (run.workspacePath) {
+      await this.safeWorkspaceAfterRun(run.workspacePath);
+    }
+    this.runContexts.delete(runId);
+
     if (!failed) {
       const updated = await this.get(runId);
       await this.options.onRunNeedsReview?.(updated);
@@ -235,6 +267,7 @@ export class RunService {
       type: failed ? "run.failed" : "run.review",
       message: failed ? `Codex app-server exited with ${String(exitCode)}.` : "Codex app-server exited; run is ready for review."
     });
+    this.terminating.delete(runId);
   }
 
   private async handleTurnCompleted(runId: string): Promise<void> {
@@ -535,10 +568,31 @@ function errorMessage(error: unknown): string {
 
 function extractTokenUsage(value: unknown): { inputTokens?: number; outputTokens?: number; totalTokens?: number } {
   if (!isRecord(value)) return {};
-  const usage = isRecord(value.usage) ? value.usage : value;
-  const inputTokens = numberValue(usage.input_tokens ?? usage.inputTokens ?? usage.prompt_tokens ?? usage.promptTokens);
-  const outputTokens = numberValue(usage.output_tokens ?? usage.outputTokens ?? usage.completion_tokens ?? usage.completionTokens);
-  const totalTokens = numberValue(usage.total_tokens ?? usage.totalTokens);
+
+  // Try value.usage first, then value.tokenUsage (or token_usage), then top-level
+  let usage = value;
+  if (isRecord(value.usage)) {
+    usage = value.usage;
+  } else if (isRecord(value.tokenUsage)) {
+    usage = value.tokenUsage;
+  } else if (isRecord((value as Record<string, unknown>).token_usage)) {
+    usage = (value as Record<string, unknown>).token_usage as Record<string, unknown>;
+  }
+
+  // Also check for nested total under tokenUsage
+  const tokenUsageTotal = isRecord(value.tokenUsage) && isRecord((value.tokenUsage as Record<string, unknown>).total)
+    ? (value.tokenUsage as Record<string, unknown>).total as Record<string, unknown>
+    : isRecord((value as Record<string, unknown>).token_usage) && isRecord(((value as Record<string, unknown>).token_usage as Record<string, unknown>).total)
+    ? ((value as Record<string, unknown>).token_usage as Record<string, unknown>).total as Record<string, unknown>
+    : undefined;
+
+  const inputTokens = numberValue(usage.input_tokens ?? usage.inputTokens ?? usage.prompt_tokens ?? usage.promptTokens)
+    ?? (tokenUsageTotal ? numberValue(tokenUsageTotal.input_tokens ?? tokenUsageTotal.inputTokens) : undefined);
+  const outputTokens = numberValue(usage.output_tokens ?? usage.outputTokens ?? usage.completion_tokens ?? usage.completionTokens)
+    ?? (tokenUsageTotal ? numberValue(tokenUsageTotal.output_tokens ?? tokenUsageTotal.outputTokens) : undefined);
+  const totalTokens = numberValue(usage.total_tokens ?? usage.totalTokens)
+    ?? (tokenUsageTotal ? numberValue(tokenUsageTotal.total_tokens ?? tokenUsageTotal.totalTokens) : undefined);
+
   return {
     ...(inputTokens !== undefined ? { inputTokens } : {}),
     ...(outputTokens !== undefined ? { outputTokens } : {}),

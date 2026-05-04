@@ -438,7 +438,7 @@ function queueEntry(task: Task, reason: QueueReason, detail?: string, nextAttemp
 }
 
 function compareCandidates(a: Task, b: Task): number {
-  const priority = (a.priority || 100) - (b.priority || 100);
+  const priority = (a.priority ?? 100) - (b.priority ?? 100);
   if (priority !== 0) return priority;
   return a.updatedAt.localeCompare(b.updatedAt);
 }

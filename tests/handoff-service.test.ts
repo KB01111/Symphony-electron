@@ -180,6 +180,18 @@ test("does not allow landing when any proof failed", () => {
   expect(handoff.landingAllowed).toBe(false);
 });
 
+test("does not allow landing when run state is not review even with passing proofs", () => {
+  const handoff = new HandoffService().build({
+    task: task(),
+    run: { ...run(), state: "running" },
+    proof: [
+      { id: "p1", runId: "run-1", kind: "test", label: "unit tests", status: "passed", detail: "10 passed", createdAt: "2026-05-02T10:00:00.000Z" }
+    ]
+  });
+
+  expect(handoff.landingAllowed).toBe(false);
+});
+
 test("does not allow landing for incomplete proof statuses", () => {
   const handoff = new HandoffService().build({
     task: task(),

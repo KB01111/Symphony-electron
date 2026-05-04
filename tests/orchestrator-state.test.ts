@@ -113,18 +113,22 @@ test("clones policy arrays for defaults and backfilled reads", async () => {
   const defaultState = defaultOrchestratorState();
   defaultState.policy.terminalStateNames.push("Mutated");
   defaultState.policy.requireApprovalFor.push("command");
+  defaultState.policy.allowedRepositories.push("https://github.com/mutated/repo");
 
   expect(defaultOrchestratorState().policy.terminalStateNames).toEqual(["Done", "Canceled", "Cancelled", "Duplicate"]);
   expect(defaultOrchestratorState().policy.requireApprovalFor).toEqual(["merge"]);
+  expect(defaultOrchestratorState().policy.allowedRepositories).toEqual([]);
 
   const store = new OrchestratorStateStore(await tempRoot());
   const readState = await store.read();
   readState.policy.terminalStateNames.push("ReadMutated");
   readState.policy.requireApprovalFor.push("network");
+  readState.policy.allowedRepositories.push("https://github.com/read/repo");
 
   const laterState = await store.read();
   expect(laterState.policy.terminalStateNames).toEqual(["Done", "Canceled", "Cancelled", "Duplicate"]);
   expect(laterState.policy.requireApprovalFor).toEqual(["merge"]);
+  expect(laterState.policy.allowedRepositories).toEqual([]);
 });
 
 test("defaultAutomationPolicy includes maxConcurrentRunsByState as empty object", () => {
