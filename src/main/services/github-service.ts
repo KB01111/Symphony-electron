@@ -17,6 +17,8 @@ interface GitHubCheckRun {
 
 interface GitHubReview {
   state?: string;
+  user?: { login?: string };
+  submitted_at?: string;
 }
 
 export class GitHubService {
@@ -94,8 +96,24 @@ export class GitHubService {
   private async reviewStatus(config: GitHubConfig, prNumber: number): Promise<ProofStatus> {
     const reviews = await this.request<GitHubReview[]>(config, `/repos/${config.owner}/${config.repo}/pulls/${prNumber}/reviews`);
     if (!reviews.length) return "unknown";
-    if (reviews.some((review) => review.state === "CHANGES_REQUESTED")) return "failed";
-    if (reviews.some((review) => review.state === "APPROVED")) return "passed";
+
+    // Group reviews by reviewer and keep only the latest review from each
+    const latestReviewsByReviewer = new Map<string, GitHubReview>();
+    for (const review of reviews) {
+      const reviewerLogin = review.user?.login;
+      if (!reviewerLogin) continue;
+
+      const existing = latestReviewsByReviewer.get(reviewerLogin);
+      if (!existing || !existing.submitted_at || !review.submitted_at || review.submitted_at > existing.submitted_at) {
+        latestReviewsByReviewer.set(reviewerLogin, review);
+      }
+    }
+
+    const latestReviews = Array.from(latestReviewsByReviewer.values());
+    if (!latestReviews.length) return "unknown";
+
+    if (latestReviews.some((review) => review.state === "CHANGES_REQUESTED")) return "failed";
+    if (latestReviews.some((review) => review.state === "APPROVED")) return "passed";
     return "warning";
   }
 
@@ -125,8 +143,19 @@ export class GitHubService {
 
 function inferPullRequestUrl(task: Task): string | undefined {
   if (!task.description) return undefined;
-  const match = task.description.match(/https?:\/\/\S+\/pull\/\d+/u);
-  return match?.[0];
+  const match = task.description.match(/https?:\/\/(www\.)?github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)/u);
+  if (!match) return undefined;
+
+  const owner = match[2];
+  const repo = match[3];
+  const number = match[4];
+
+  if (!owner || !repo || !number) return undefined;
+
+  // Strip any trailing punctuation
+  const cleanedNumber = number.replace(/[.,;:]+$/u, "");
+
+  return `https://github.com/${owner}/${repo}/pull/${cleanedNumber}`;
 }
 
 export function aggregateProofStatus(statuses: ProofStatus[]): ProofStatus {

@@ -82,6 +82,15 @@ interface LinearMutationResponse {
   errors?: Array<{ message: string }>;
 }
 
+interface LinearTeamResponse {
+  data?: {
+    teams?: {
+      nodes?: Array<{ id: string; key: string }>;
+    };
+  };
+  errors?: Array<{ message: string }>;
+}
+
 export class LinearClient {
   private readonly fetchImpl: FetchLike;
   private readonly workflowStateCache = new Map<string, { expiresAt: number; states: LinearWorkflowState[] }>();
@@ -168,12 +177,34 @@ export class LinearClient {
     return this.listIssues(terminalConfig);
   }
 
+  async resolveTeamId(config: LinearConfig, teamKey: string): Promise<string> {
+    const payload = await this.graphql<LinearTeamResponse>(config, {
+      query: `
+        query SymphonyTeam($key: String!) {
+          teams(filter: { key: { eq: $key } }, first: 1) {
+            nodes { id key }
+          }
+        }
+      `,
+      variables: { key: teamKey }
+    });
+    const team = payload.data?.teams?.nodes?.[0];
+    if (!team) {
+      throw new Error(`Linear team not found: ${teamKey}`);
+    }
+    return team.id;
+  }
+
   async createIssue(config: LinearConfig, input: CreateIssueInput): Promise<Task> {
-    const teamKey = input.teamKey ?? config.teamKey;
-    if (!teamKey) {
+    const effectiveTeamKey = input.teamKey ?? config.teamKey;
+    if (!effectiveTeamKey) {
       throw new Error("Linear team key is required to create issues.");
     }
-    const states = input.stateName ? await this.listWorkflowStates(config, teamKey) : [];
+
+    // Resolve team key to UUID
+    const teamId = await this.resolveTeamId(config, effectiveTeamKey);
+
+    const states = input.stateName ? await this.listWorkflowStates(config, effectiveTeamKey) : [];
     const state = input.stateName ? states.find((candidate) => candidate.name.toLowerCase() === input.stateName!.toLowerCase()) : undefined;
     if (input.stateName && !state) {
       throw new Error(`Linear workflow state not found: ${input.stateName}`);
@@ -207,7 +238,7 @@ export class LinearClient {
         input: {
           title: input.title,
           ...(input.description ? { description: input.description } : {}),
-          teamId: teamKey,
+          teamId,
           ...(state ? { stateId: state.id } : {}),
           ...(input.parentIssueId ? { parentId: input.parentIssueId } : {})
         }
@@ -356,5 +387,5 @@ export class LinearClient {
 }
 
 function workflowStateCacheKey(config: LinearConfig, teamKey?: string): string {
-  return [config.teamKey ?? teamKey ?? "", config.projectName ?? "", config.projectSlug ?? ""].join("|");
+  return [teamKey ?? config.teamKey ?? "", config.projectName ?? "", config.projectSlug ?? ""].join("|");
 }

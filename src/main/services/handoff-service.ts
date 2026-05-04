@@ -12,7 +12,7 @@ export class HandoffService {
   constructor(private readonly now: () => string = () => isoNow()) {}
 
   build(input: HandoffInput): HandoffDraft {
-    const pr = input.proof.find((entry) => entry.kind === "pr" || entry.kind === "github_check");
+    const pr = input.proof.find((entry) => entry.kind === "pr");
     const complexity = input.proof.find((entry) => entry.kind === "complexity");
     const walkthrough = input.proof.find((entry) => entry.kind === "walkthrough_video");
     const hasPassingProof = input.proof.length > 0 && input.proof.every((entry) => entry.status === "passed");

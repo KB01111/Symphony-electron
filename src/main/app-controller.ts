@@ -324,7 +324,10 @@ export class AppController {
     if (!config.apiKey || task.source !== "linear") return false;
     const state = await this.linear.getIssueState(config, task.externalId);
     if (!state) return false;
-    const terminal = new Set((config.terminalStateNames ?? []).map((name) => name.trim().toLowerCase()));
+    const terminalStateNames = (config.terminalStateNames ?? []).length === 0
+      ? ["Done", "Closed", "Cancelled", "Canceled", "Duplicate"]
+      : config.terminalStateNames ?? [];
+    const terminal = new Set(terminalStateNames.map((name) => name.trim().toLowerCase()));
     return !terminal.has(state.status.trim().toLowerCase()) && (run.turnCount ?? 1) > 0;
   }
 }
