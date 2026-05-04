@@ -113,18 +113,22 @@ test("clones policy arrays for defaults and backfilled reads", async () => {
   const defaultState = defaultOrchestratorState();
   defaultState.policy.terminalStateNames.push("Mutated");
   defaultState.policy.requireApprovalFor.push("command");
+  defaultState.policy.allowedRepositories.push("https://github.com/mutated/repo");
 
   expect(defaultOrchestratorState().policy.terminalStateNames).toEqual(["Done", "Canceled", "Cancelled", "Duplicate"]);
   expect(defaultOrchestratorState().policy.requireApprovalFor).toEqual(["merge"]);
+  expect(defaultOrchestratorState().policy.allowedRepositories).toEqual([]);
 
   const store = new OrchestratorStateStore(await tempRoot());
   const readState = await store.read();
   readState.policy.terminalStateNames.push("ReadMutated");
   readState.policy.requireApprovalFor.push("network");
+  readState.policy.allowedRepositories.push("https://github.com/read/repo");
 
   const laterState = await store.read();
   expect(laterState.policy.terminalStateNames).toEqual(["Done", "Canceled", "Cancelled", "Duplicate"]);
   expect(laterState.policy.requireApprovalFor).toEqual(["merge"]);
+  expect(laterState.policy.allowedRepositories).toEqual([]);
 });
 
 test("defaultAutomationPolicy includes maxConcurrentRunsByState as empty object", () => {
@@ -143,6 +147,14 @@ test("cloneAutomationPolicy does not share maxConcurrentRunsByState reference", 
 
   (a.policy.maxConcurrentRunsByState as Record<string, number>)["in_progress"] = 3;
   expect(b.policy.maxConcurrentRunsByState).not.toHaveProperty("in_progress");
+});
+
+test("cloneAutomationPolicy does not share allowedRepositories reference", () => {
+  const a = defaultOrchestratorState();
+  const b = defaultOrchestratorState();
+
+  a.policy.allowedRepositories.push("https://github.com/acme/widgets");
+  expect(b.policy.allowedRepositories).toEqual([]);
 });
 
 test("store read backfills maxConcurrentRunsByState default when missing from persisted state", async () => {

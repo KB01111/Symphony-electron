@@ -21,8 +21,10 @@
   import type {
     ApprovalRequest,
     CodexAccountStatus,
+    GitHubPrStatus,
     HandoffDraft,
     HealthCheckResult,
+    LandingDecision,
     LinearConfig,
     OrchestratorSnapshot,
     Profile,
@@ -41,7 +43,7 @@
   const api = window.symphony;
   const transcriptFont = '12px "Cascadia Mono", "Consolas", monospace';
   const transcriptMetricsCache = new Map<string, string>();
-  const runDetailTabs = ["transcript", "events", "approvals", "proof", "workspace", "handoff"] as const;
+  const runDetailTabs = ["transcript", "events", "approvals", "proof", "workspace", "handoff", "landing"] as const;
 
   let profiles: Profile[] = [];
   let tasks: Task[] = [];
@@ -53,7 +55,9 @@
   let orchestrator: OrchestratorSnapshot | null = null;
   let proof: ProofEntry[] = [];
   let handoff: HandoffDraft | null = null;
-  let runDetailTab: "transcript" | "events" | "approvals" | "proof" | "workspace" | "handoff" = "transcript";
+  let githubStatus: GitHubPrStatus | null = null;
+  let landingDecision: LandingDecision | null = null;
+  let runDetailTab: "transcript" | "events" | "approvals" | "proof" | "workspace" | "handoff" | "landing" = "transcript";
   let selectedProfileId = "";
   let selectedTaskId = "";
   let selectedRunId = "";
@@ -80,6 +84,8 @@
   $: failedRuns = runs.filter((run) => run.state === "failed");
   $: reviewRuns = runs.filter((run) => run.state === "review");
   $: pendingApprovals = approvals.filter((approval) => approval.status === "pending");
+  $: queueReasons = orchestrator?.queue ?? [];
+  $: safeGithubPrUrl = safeExternalUrl(githubStatus?.prUrl);
 
   let cleanupRunEvents: (() => void) | undefined;
   let cleanupTranscriptEvents: (() => void) | undefined;
@@ -150,6 +156,8 @@
       approvals = await api.runs.listApprovals();
       proof = [];
       handoff = null;
+      githubStatus = null;
+      landingDecision = null;
       return;
     }
     selectedRunId = run.id;
@@ -163,6 +171,8 @@
     transcript = nextTranscript;
     approvals = nextApprovals;
     proof = nextProof;
+    githubStatus = null;
+    landingDecision = null;
   }
 
   async function refreshAccountStatuses(): Promise<void> {
@@ -218,7 +228,8 @@
 
   async function toggleAutomation(): Promise<void> {
     await runAction(async () => {
-      orchestrator = orchestrator?.state.paused ? { state: await api.orchestrator.resume(), queuedTaskIds: [], activeRuns: [] } : { state: await api.orchestrator.pause(), queuedTaskIds: [], activeRuns: [] };
+      await (orchestrator?.state.paused ? api.orchestrator.resume() : api.orchestrator.pause());
+      orchestrator = await api.orchestrator.snapshot();
     }, orchestrator?.state.paused ? "Resuming automation" : "Pausing automation");
   }
 
@@ -235,6 +246,24 @@
     } finally {
       busy = false;
     }
+  }
+
+  async function syncGithubStatus(): Promise<void> {
+    if (!selectedRun) return;
+    await runAction(async () => {
+      githubStatus = await api.github.status(selectedRun.id);
+      proof = await api.proof.list(selectedRun.id);
+      runDetailTab = "landing";
+    }, "Syncing PR/check status");
+  }
+
+  async function approveLanding(): Promise<void> {
+    if (!selectedRun) return;
+    await runAction(async () => {
+      landingDecision = await api.landing.approve(selectedRun.id, "Approved from Symphony command center.");
+      proof = await api.proof.list(selectedRun.id);
+      runDetailTab = "landing";
+    }, "Recording landing approval");
   }
 
   async function startRun(task: Task): Promise<void> {
@@ -279,6 +308,16 @@
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean);
+  }
+
+  function safeExternalUrl(value: string | undefined): string | undefined {
+    if (!value) return undefined;
+    try {
+      const url = new URL(value);
+      return url.protocol === "https:" || url.protocol === "http:" ? url.href : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   function badgeTone(value: string): "neutral" | "good" | "warn" | "bad" | "info" {
@@ -466,6 +505,7 @@
             <div class="space-y-2">
               {#each tasks as task}
                 {@const run = runByTask.get(task.id)}
+                {@const reason = queueReasons.find((entry) => entry.taskId === task.id)}
                 <button
                   class="w-full rounded-md border p-3 text-left transition {selectedTaskId === task.id
                     ? 'border-stone-900 bg-stone-100'
@@ -486,7 +526,13 @@
                     {#if task.blockers?.length}
                       <span class="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] text-amber-800">{task.blockers.length} blockers</span>
                     {/if}
+                    {#if reason}
+                      <span class="rounded bg-blue-100 px-1.5 py-0.5 text-[11px] text-blue-800">{reason.reason}</span>
+                    {/if}
                   </div>
+                  {#if reason?.detail}
+                    <p class="mt-2 text-xs text-stone-600">{reason.detail}</p>
+                  {/if}
                 </button>
               {:else}
                 <div class="rounded-md border border-dashed border-stone-300 p-4 text-sm text-stone-600">
@@ -551,6 +597,9 @@
                       <Badge tone={badgeTone(run.state)}>{run.state}</Badge>
                     </div>
                     <p class="mt-1 truncate text-xs text-stone-600">{run.workspacePath ?? run.taskId}</p>
+                    <p class="mt-1 text-xs text-stone-500">
+                      {run.turnCount ?? 0} turns{run.totalTokens ? ` · ${run.totalTokens} tokens` : ""}
+                    </p>
                   </button>
                 {:else}
                   <div class="rounded-md border border-dashed border-stone-300 p-4 text-sm text-stone-600">
@@ -656,6 +705,10 @@
                     <p class="mt-1 break-all text-stone-600">{selectedRun?.workspacePath ?? "No workspace path recorded."}</p>
                     <p class="mt-3 font-medium">Run id</p>
                     <p class="mt-1 break-all text-stone-600">{selectedRun?.id ?? "No run selected."}</p>
+                    <p class="mt-3 font-medium">Runtime metrics</p>
+                    <p class="mt-1 text-stone-600">
+                      Turns {selectedRun?.turnCount ?? 0}; input {selectedRun?.inputTokens ?? 0}; output {selectedRun?.outputTokens ?? 0}; total {selectedRun?.totalTokens ?? 0}
+                    </p>
                   </div>
                 {:else if runDetailTab === "handoff"}
                   <div class="mb-3 flex justify-end">
@@ -666,6 +719,26 @@
                   {:else}
                     <p class="rounded-md border border-dashed border-stone-300 p-3 text-sm text-stone-600">Build a handoff when the run is ready for Human Review.</p>
                   {/if}
+                {:else if runDetailTab === "landing"}
+                  <div class="mb-3 flex gap-2">
+                    <Button variant="secondary" className="h-8" on:click={syncGithubStatus} disabled={!selectedRun || busy}>Sync PR/checks</Button>
+                    <Button variant="primary" className="h-8" on:click={approveLanding} disabled={!selectedRun || selectedRun.state !== "review" || busy}>Approve landing</Button>
+                  </div>
+                  <div class="space-y-2">
+                    <div class="rounded-md border border-stone-300 bg-stone-50 p-3 text-sm">
+                      <p class="font-medium">PR and review status</p>
+                      <p class="mt-1 text-stone-600">{githubStatus?.detail ?? "Sync PR/check status to populate GitHub proof."}</p>
+                      {#if safeGithubPrUrl}
+                        <a class="mt-2 block break-all text-blue-700 underline" href={safeGithubPrUrl} target="_blank" rel="noreferrer">{safeGithubPrUrl}</a>
+                      {:else if githubStatus?.prUrl}
+                        <p class="mt-2 break-all text-xs text-stone-500">{githubStatus.prUrl}</p>
+                      {/if}
+                    </div>
+                    <div class="rounded-md border border-stone-300 bg-stone-50 p-3 text-sm">
+                      <p class="font-medium">Landing decision</p>
+                      <p class="mt-1 text-stone-600">{landingDecision ? `${landingDecision.approved ? "Approved" : "Not approved"} · ${landingDecision.reason ?? ""}` : "No landing decision recorded."}</p>
+                    </div>
+                  </div>
                 {/if}
               </div>
             </Card>
@@ -699,8 +772,62 @@
             {#if orchestrator?.state.lastTickAt}
               <p class="mt-3 flex items-center gap-2 text-xs text-stone-600"><Clock3 size={14} /> Last tick {orchestrator.state.lastTickAt}</p>
             {/if}
+            {#if orchestrator?.nextPollAt}
+              <p class="mt-2 flex items-center gap-2 text-xs text-stone-600"><Clock3 size={14} /> Next poll {orchestrator.nextPollAt}</p>
+            {/if}
             {#if orchestrator?.state.lastError}
               <p class="mt-3 text-sm text-red-700">{orchestrator.state.lastError}</p>
+            {/if}
+          </Card>
+
+          <Card className="p-4">
+            <div class="mb-3 flex items-center gap-2">
+              <Activity size={18} />
+              <h3 class="font-semibold">Queue reasons</h3>
+            </div>
+            <div class="space-y-2">
+              {#each queueReasons as item}
+                <div class="rounded-md border border-stone-300 bg-stone-50 p-3">
+                  <div class="flex items-center justify-between gap-2">
+                    <p class="text-sm font-medium">{item.identifier}</p>
+                    <Badge tone="info">{item.reason}</Badge>
+                  </div>
+                  {#if item.detail}
+                    <p class="mt-1 text-xs text-stone-600">{item.detail}</p>
+                  {/if}
+                </div>
+              {:else}
+                <div class="rounded-md border border-dashed border-stone-300 p-3 text-sm text-stone-600">
+                  No queued issues are blocked by policy, dependencies, retry backoff, or concurrency.
+                </div>
+              {/each}
+            </div>
+          </Card>
+
+          <Card className="p-4">
+            <div class="mb-3 flex items-center gap-2">
+              <ShieldCheck size={18} />
+              <h3 class="font-semibold">Policy gates</h3>
+            </div>
+            {#if orchestrator}
+              <div class="space-y-2 text-sm">
+                <div class="flex items-center justify-between">
+                  <span class="text-stone-600">Auto start</span>
+                  <Badge tone={orchestrator.state.policy.autoStart ? "good" : "neutral"}>{orchestrator.state.policy.autoStart ? "on" : "off"}</Badge>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-stone-600">Auto PR</span>
+                  <Badge tone={orchestrator.state.policy.autoCreatePr ? "warn" : "neutral"}>{orchestrator.state.policy.autoCreatePr ? "on" : "off"}</Badge>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-stone-600">Auto merge</span>
+                  <Badge tone={orchestrator.state.policy.autoMerge ? "bad" : "good"}>{orchestrator.state.policy.autoMerge ? "on" : "off"}</Badge>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-stone-600">Landing approval</span>
+                  <Badge tone={orchestrator.state.policy.requireApprovalForLanding ? "good" : "warn"}>{orchestrator.state.policy.requireApprovalForLanding ? "required" : "not required"}</Badge>
+                </div>
+              </div>
             {/if}
           </Card>
 
@@ -780,6 +907,13 @@
                   <span class="text-stone-600">Concurrency</span>
                   <span>{workflow.maxConcurrentRuns}</span>
                 </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-stone-600">Max turns</span>
+                  <span>{workflow.maxTurns}</span>
+                </div>
+                {#if workflow.repositoryUrl}
+                  <p class="break-all text-xs text-stone-600">{workflow.repositoryUrl}</p>
+                {/if}
                 {#if !workflow.validation.ok}
                   <div class="rounded-md bg-red-50 p-2 text-xs text-red-800">
                     {workflow.validation.errors.join("; ")}

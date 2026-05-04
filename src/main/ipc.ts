@@ -1,6 +1,6 @@
 import { BrowserWindow, ipcMain } from "electron";
 import type { AppController } from "./app-controller.js";
-import type { AutomationPolicy, LinearConfig, Task } from "../shared/types.js";
+import type { AutomationPolicy, CreateIssueInput, LinearConfig, Task } from "../shared/types.js";
 import { eventToTranscriptItem } from "../shared/transcript.js";
 
 /**
@@ -33,6 +33,7 @@ export function registerIpc(controller: AppController): void {
   ipcMain.handle("linear:syncNow", () => controller.syncLinear());
   ipcMain.handle("linear:transitionIssue", (_event, issueId: string, stateName: string) => controller.transitionLinearIssue(issueId, stateName));
   ipcMain.handle("linear:addComment", (_event, issueId: string, body: string) => controller.addLinearComment(issueId, body));
+  ipcMain.handle("linear:createIssue", (_event, input: CreateIssueInput) => controller.createLinearIssue(input));
 
   ipcMain.handle("workflow:snapshot", () => controller.workflowSnapshot());
   ipcMain.handle("workflow:validate", () => controller.validateWorkflow());
@@ -64,7 +65,10 @@ export function registerIpc(controller: AppController): void {
   ipcMain.handle("orchestrator:updatePolicy", (_event, policy: Partial<AutomationPolicy>) => controller.orchestrator.updatePolicy(policy));
 
   ipcMain.handle("proof:list", (_event, runId: string) => controller.proof.list(runId));
+  ipcMain.handle("proof:listAll", () => controller.proof.listAll());
   ipcMain.handle("handoff:build", (_event, runId: string) => controller.buildHandoff(runId));
+  ipcMain.handle("github:status", (_event, runId: string) => controller.githubStatus(runId));
+  ipcMain.handle("landing:approve", (_event, runId: string, reason?: string) => controller.approveLanding(runId, reason));
 
   ipcMain.handle("logs:tail", (_event, runId: string) => controller.eventLog.replay(runId));
   ipcMain.handle("logs:export", (_event, runId: string) => controller.eventLog.exportPath(runId));

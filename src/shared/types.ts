@@ -6,6 +6,8 @@ export type ApprovalStatus = "pending" | "approved" | "denied";
 
 export type ApprovalKind = "command" | "patch" | "tool" | "network" | "filesystem" | "handoff" | "merge" | "unknown";
 
+export type QueueReason = "blocked" | "paused" | "policy_disabled" | "concurrency" | "state_concurrency" | "retry" | "already_running" | "missing_profile";
+
 export interface Profile {
   id: string;
   name: string;
@@ -33,14 +35,41 @@ export interface LinearConfig {
   pollIntervalSeconds?: number;
   maxConcurrentRuns?: number;
   repositoryUrl?: string;
+  workflowManaged?: boolean;
 }
 
 export interface LinearBlocker {
   id?: string;
   identifier?: string;
   state?: string;
+  relationType?: string;
   createdAt?: string;
   updatedAt?: string;
+}
+
+export interface CreateIssueInput {
+  title: string;
+  description?: string;
+  teamKey?: string;
+  projectName?: string;
+  stateName?: string;
+  labels?: string[];
+  parentIssueId?: string;
+}
+
+export interface GitHubConfig {
+  token?: string;
+  owner: string;
+  repo: string;
+  apiBaseUrl?: string;
+}
+
+export interface CreatePrInput {
+  title: string;
+  body: string;
+  head: string;
+  base: string;
+  draft?: boolean;
 }
 
 export interface Task {
@@ -92,7 +121,13 @@ export interface Run {
   threadId?: string;
   turnId?: string;
   attempt?: number;
+  turnCount?: number;
   pid?: number;
+  lastCodexEvent?: string;
+  lastCodexMessage?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
   startedAt?: string;
   updatedAt: string;
   completedAt?: string;
@@ -128,8 +163,15 @@ export type OrchestratorMode = "manual" | "autonomous";
 
 export interface AutomationPolicy {
   autoStart: boolean;
+  autoTransitionInProgress: boolean;
   autoCreateHandoff: boolean;
   autoWriteTrackerUpdates: boolean;
+  autoCreatePr: boolean;
+  autoUpdatePr: boolean;
+  autoMerge: boolean;
+  requireApprovalForLanding: boolean;
+  trustedEnvironment: boolean;
+  allowedRepositories: string[];
   maxConcurrentRuns: number;
   maxConcurrentRunsByState: Record<string, number>;
   pollIntervalSeconds: number;
@@ -164,10 +206,31 @@ export interface OrchestratorState {
   lastError?: string;
 }
 
+export interface QueuedTask {
+  taskId: string;
+  identifier: string;
+  reason: QueueReason;
+  detail?: string;
+  nextAttemptAt?: string;
+}
+
+export interface ActiveRunMetric extends RunReference {
+  identifier?: string;
+  startedAt?: string;
+  lastEventAt?: string;
+  turnCount?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+}
+
 export interface OrchestratorSnapshot {
   state: OrchestratorState;
   queuedTaskIds: string[];
+  queue: QueuedTask[];
   activeRuns: RunReference[];
+  activeMetrics: ActiveRunMetric[];
+  nextPollAt?: string;
 }
 
 export interface ApprovalRequest {
@@ -184,7 +247,21 @@ export interface ApprovalRequest {
   resolvedAt?: string;
 }
 
-export type ProofKind = "test" | "ci" | "review" | "diff" | "pr" | "token_usage" | "rate_limit" | "summary";
+export type ProofKind =
+  | "test"
+  | "ci"
+  | "review"
+  | "diff"
+  | "pr"
+  | "github_check"
+  | "pr_review"
+  | "complexity"
+  | "walkthrough_video"
+  | "artifact"
+  | "landing"
+  | "token_usage"
+  | "rate_limit"
+  | "summary";
 
 export type ProofStatus = "passed" | "failed" | "warning" | "unknown";
 
@@ -195,7 +272,12 @@ export interface ProofEntry {
   label: string;
   status: ProofStatus;
   detail: string;
+  source?: string;
+  url?: string;
+  path?: string;
+  metadata?: Record<string, unknown>;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface ProofInput {
@@ -203,6 +285,10 @@ export interface ProofInput {
   label: string;
   status: ProofStatus;
   detail: string;
+  source?: string;
+  url?: string;
+  path?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface HandoffDraft {
@@ -210,7 +296,33 @@ export interface HandoffDraft {
   taskId: string;
   title: string;
   body: string;
+  branchName?: string;
+  prUrl?: string;
+  proofSummary?: string;
+  diffSummary?: string;
+  landingAllowed: boolean;
   createdAt: string;
+}
+
+export interface GitHubPrStatus {
+  runId: string;
+  taskId: string;
+  repositoryUrl?: string;
+  branchName?: string;
+  prUrl?: string;
+  prNumber?: number;
+  merged?: boolean;
+  checksStatus: ProofStatus;
+  reviewStatus: ProofStatus;
+  detail: string;
+  updatedAt: string;
+}
+
+export interface LandingDecision {
+  runId: string;
+  approved: boolean;
+  reason?: string;
+  decidedAt: string;
 }
 
 export interface HealthCheckResult {
@@ -241,8 +353,12 @@ export interface WorkflowSnapshot {
   validation: WorkflowValidation;
   pollIntervalSeconds: number;
   maxConcurrentRuns: number;
+  maxTurns: number;
   activeStateNames: string[];
   terminalStateNames: string[];
+  repositoryUrl?: string;
+  autoCreatePr?: boolean;
+  autoMerge?: boolean;
 }
 
 export interface RetryEntry {
@@ -287,6 +403,7 @@ export interface SymphonyApi {
     syncNow(): Promise<Task[]>;
     transitionIssue(issueId: string, stateName: string): Promise<void>;
     addComment(issueId: string, body: string): Promise<void>;
+    createIssue(input: CreateIssueInput): Promise<Task>;
   };
   workflow: {
     snapshot(): Promise<WorkflowSnapshot>;
@@ -324,9 +441,16 @@ export interface SymphonyApi {
   };
   proof: {
     list(runId: string): Promise<ProofEntry[]>;
+    listAll(): Promise<ProofEntry[]>;
   };
   handoff: {
     build(runId: string): Promise<HandoffDraft>;
+  };
+  github: {
+    status(runId: string): Promise<GitHubPrStatus>;
+  };
+  landing: {
+    approve(runId: string, reason?: string): Promise<LandingDecision>;
   };
   logs: {
     tail(runId: string): Promise<RunEvent[]>;

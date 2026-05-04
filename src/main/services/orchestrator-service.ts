@@ -1,14 +1,16 @@
-import type { AutomationPolicy, OrchestratorSnapshot, OrchestratorState, Run, Task } from "../../shared/types.js";
+import type { ActiveRunMetric, AutomationPolicy, OrchestratorSnapshot, OrchestratorState, QueueReason, QueuedTask, Run, Task } from "../../shared/types.js";
 import type { RunEventInput } from "./event-log.js";
 
 type OrchestratorDependencies = {
   readState(): Promise<OrchestratorState>;
   writeState(state: OrchestratorState): Promise<void>;
   listCandidateTasks(): Promise<Task[]>;
+  getIssueState?(task: Task): Promise<{ status: string; updatedAt?: string } | undefined>;
   listRuns(): Promise<Run[]>;
   startRun(task: Task): Promise<Run>;
   appendEvent(runId: string, event: RunEventInput): Promise<unknown>;
   terminateRun?(runId: string): Promise<Run | void>;
+  cleanWorkspace?(task: Task): Promise<void>;
   now?: () => Date;
 };
 
@@ -61,11 +63,90 @@ export class OrchestratorService {
   }
 
   async snapshot(): Promise<OrchestratorSnapshot> {
-    const state = await this.dependencies.readState();
+    const [state, candidates, runs] = await Promise.all([
+      this.dependencies.readState(),
+      this.dependencies.listCandidateTasks(),
+      this.dependencies.listRuns()
+    ]);
+    const runsById = new Map(runs.map((run) => [run.id, run]));
+    const now = this.now();
+    const activeRuns = runs.filter((run) => ACTIVE_RUN_STATES.has(run.state));
+    const launchedTaskIds = new Set(runs.map((run) => run.taskId));
+    const activeTaskIds = new Set(activeRuns.map((run) => run.taskId));
+    const claimedTaskIds = new Set(state.activeClaims.map((claim) => claim.taskId));
+    const terminalStateNames = new Set(state.policy.terminalStateNames.map(normalize));
+    const retryQueueByTaskId = new Map(state.retryQueue.map((entry) => [entry.taskId, entry]));
+    const queue: QueuedTask[] = [];
+
+    // Compute state concurrency from active claims and runs
+    const stateConcurrency = new Map<string, number>();
+    const claimedRunIds = new Set<string>();
+    for (const claim of state.activeClaims) {
+      const run = runsById.get(claim.runId);
+      if (!run || !ACTIVE_RUN_STATES.has(run.state)) continue;
+      claimedRunIds.add(claim.runId);
+      const task = candidates.find((c) => c.id === claim.taskId);
+      const stateKey = normalize(task?.status ?? run.state);
+      stateConcurrency.set(stateKey, (stateConcurrency.get(stateKey) ?? 0) + 1);
+    }
+    for (const run of activeRuns) {
+      if (!claimedRunIds.has(run.id)) {
+        const stateKey = normalize(run.state);
+        stateConcurrency.set(stateKey, (stateConcurrency.get(stateKey) ?? 0) + 1);
+      }
+    }
+
+    let activeCount = new Set([...activeTaskIds, ...claimedTaskIds]).size;
+
+    // Build queue by iterating over candidates with same filtering logic as runTick
+    for (const candidate of [...candidates].sort(compareCandidates)) {
+      if (claimedTaskIds.has(candidate.id) || activeTaskIds.has(candidate.id) || launchedTaskIds.has(candidate.id)) {
+        continue;
+      }
+
+      if (terminalStateNames.has(normalize(candidate.status))) {
+        // Skip - would be cleaned in tick(), not shown in queue
+        continue;
+      }
+
+      if (!passesBlockerGate(candidate, terminalStateNames)) {
+        queue.push(queueEntry(candidate, "blocked", "One or more blockers are not terminal."));
+        continue;
+      }
+
+      if (state.paused || !state.policy.autoStart) {
+        queue.push(queueEntry(candidate, state.paused ? "paused" : "policy_disabled", state.paused ? "Automation is paused." : "Auto-start is disabled."));
+        continue;
+      }
+
+      const retry = retryQueueByTaskId.get(candidate.id);
+      if (retry && new Date(retry.nextAttemptAt).getTime() > now.getTime()) {
+        queue.push(queueEntry(candidate, "retry", retry.lastError, retry.nextAttemptAt));
+        continue;
+      }
+
+      if (activeCount >= state.policy.maxConcurrentRuns) {
+        queue.push(queueEntry(candidate, "concurrency", `Global concurrency limit ${state.policy.maxConcurrentRuns} reached.`));
+        continue;
+      }
+
+      const stateKey = normalize(candidate.status);
+      const stateLimit = state.policy.maxConcurrentRunsByState[stateKey];
+      if (stateLimit !== undefined && (stateConcurrency.get(stateKey) ?? 0) >= stateLimit) {
+        queue.push(queueEntry(candidate, "state_concurrency", `State concurrency limit ${stateLimit} reached for ${candidate.status}.`));
+        continue;
+      }
+
+      // If we reach here, the task would be started in tick() - don't add to queue (it's shown as active/would be launched)
+    }
+
     return {
       state,
-      queuedTaskIds: [],
-      activeRuns: state.activeClaims.map((claim) => ({ id: claim.runId, taskId: claim.taskId }))
+      queuedTaskIds: queue.map((entry) => entry.taskId),
+      queue,
+      activeRuns: state.activeClaims.map((claim) => ({ id: claim.runId, taskId: claim.taskId })),
+      activeMetrics: buildActiveMetrics(state, runsById),
+      ...(!state.paused ? { nextPollAt: new Date(now.getTime() + state.policy.pollIntervalSeconds * 1000).toISOString() } : {})
     };
   }
 
@@ -92,7 +173,7 @@ export class OrchestratorService {
     const launchedTaskIds = new Set(runs.map((run) => run.taskId));
     const activeTaskIds = new Set(activeRuns.map((run) => run.taskId));
     const terminalStateNames = new Set(state.policy.terminalStateNames.map(normalize));
-    const queuedTaskIds: string[] = [];
+    const queue: QueuedTask[] = [];
     const retryQueueByTaskId = new Map(state.retryQueue.map((entry) => [entry.taskId, entry]));
     const activeClaims: OrchestratorState["activeClaims"] = [];
     const next: OrchestratorState = {
@@ -106,17 +187,34 @@ export class OrchestratorService {
 
     for (const claim of state.activeClaims) {
       const run = runsById.get(claim.runId);
-      if (!run || !ACTIVE_RUN_STATES.has(run.state)) {
-        continue;
-      }
+      if (!run) continue;
       const task = candidatesById.get(claim.taskId);
-      if (task && terminalStateNames.has(normalize(task.status))) {
+      if (!ACTIVE_RUN_STATES.has(run.state)) continue;
+
+      // Always check tracker state for active claims, even if task is not in candidates
+      let refreshedState: { status: string; updatedAt?: string } | undefined;
+      let taskForLookup: Task | undefined = task;
+      if (this.dependencies.getIssueState) {
+        // If task is not in candidates, construct a minimal task object for lookup
+        if (!taskForLookup && claim.identifier) {
+          taskForLookup = { id: claim.taskId, identifier: claim.identifier } as Task;
+        }
+        if (taskForLookup) {
+          refreshedState = await this.dependencies.getIssueState(taskForLookup).catch(() => undefined);
+        }
+      }
+
+      const effectiveStatus = refreshedState?.status ?? task?.status;
+      if (effectiveStatus && terminalStateNames.has(normalize(effectiveStatus))) {
         await this.cancelClaim(claim.runId, "tracker_terminal", "Tracker moved to a terminal state.");
+        const taskToClean = taskForLookup ?? task;
+        if (taskToClean) {
+          await this.dependencies.cleanWorkspace?.(taskToClean);
+        }
         continue;
       }
-      const lastActivity = Math.max(
-        ...[claim.lastEventAt, run.updatedAt, claim.startedAt].filter(Boolean).map((ts) => new Date(ts!).getTime())
-      );
+      const lastActivityAt = newerIso(claim.lastEventAt, run.updatedAt) ?? claim.startedAt;
+      const lastActivity = new Date(lastActivityAt).getTime();
       const stalled = next.policy.stallTimeoutSeconds > 0 && now.getTime() - lastActivity > next.policy.stallTimeoutSeconds * 1000;
       if (stalled) {
         await this.cancelClaim(claim.runId, "orchestrator.stalled", "Run exceeded stall timeout.");
@@ -147,36 +245,41 @@ export class OrchestratorService {
     const claimedTaskIds = new Set(activeClaims.map((claim) => claim.taskId));
     let activeCount = new Set([...activeTaskIds, ...claimedTaskIds]).size;
 
-    for (const candidate of candidates) {
-      if (claimedTaskIds.has(candidate.id) || launchedTaskIds.has(candidate.id)) {
+    for (const candidate of [...candidates].sort(compareCandidates)) {
+      if (claimedTaskIds.has(candidate.id) || activeTaskIds.has(candidate.id) || launchedTaskIds.has(candidate.id)) {
+        continue;
+      }
+
+      if (terminalStateNames.has(normalize(candidate.status))) {
+        await this.dependencies.cleanWorkspace?.(candidate);
         continue;
       }
 
       if (!passesBlockerGate(candidate, terminalStateNames)) {
-        queuedTaskIds.push(candidate.id);
+        queue.push(queueEntry(candidate, "blocked", "One or more blockers are not terminal."));
         continue;
       }
 
       if (next.paused || !next.policy.autoStart) {
-        queuedTaskIds.push(candidate.id);
+        queue.push(queueEntry(candidate, next.paused ? "paused" : "policy_disabled", next.paused ? "Automation is paused." : "Auto-start is disabled."));
         continue;
       }
 
       const retry = retryQueueByTaskId.get(candidate.id);
       if (retry && new Date(retry.nextAttemptAt).getTime() > now.getTime()) {
-        queuedTaskIds.push(candidate.id);
+        queue.push(queueEntry(candidate, "retry", retry.lastError, retry.nextAttemptAt));
         continue;
       }
 
       if (activeCount >= next.policy.maxConcurrentRuns) {
-        queuedTaskIds.push(candidate.id);
+        queue.push(queueEntry(candidate, "concurrency", `Global concurrency limit ${next.policy.maxConcurrentRuns} reached.`));
         continue;
       }
 
       const stateKey = normalize(candidate.status);
       const stateLimit = next.policy.maxConcurrentRunsByState[stateKey];
       if (stateLimit !== undefined && (stateConcurrency.get(stateKey) ?? 0) >= stateLimit) {
-        queuedTaskIds.push(candidate.id);
+        queue.push(queueEntry(candidate, "state_concurrency", `State concurrency limit ${stateLimit} reached for ${candidate.status}.`));
         continue;
       }
 
@@ -192,6 +295,7 @@ export class OrchestratorService {
           lastError: (error as Error).message
         });
         next.retryQueue = [...retryQueueByTaskId.values()];
+        queue.push(queueEntry(candidate, "retry", (error as Error).message, retryQueueByTaskId.get(candidate.id)?.nextAttemptAt));
         continue;
       }
 
@@ -221,8 +325,11 @@ export class OrchestratorService {
     await this.dependencies.writeState(next);
     return {
       state: next,
-      queuedTaskIds,
-      activeRuns: next.activeClaims.map((claim) => ({ id: claim.runId, taskId: claim.taskId }))
+      queuedTaskIds: queue.map((entry) => entry.taskId),
+      queue,
+      activeRuns: next.activeClaims.map((claim) => ({ id: claim.runId, taskId: claim.taskId })),
+      activeMetrics: buildActiveMetrics(next, runsById),
+      ...(!next.paused ? { nextPollAt: new Date(now.getTime() + next.policy.pollIntervalSeconds * 1000).toISOString() } : {})
     };
   }
 
@@ -318,6 +425,39 @@ function normalize(value: string): string {
 function passesBlockerGate(task: Task, terminalStateNames: Set<string>): boolean {
   if (normalize(task.status) !== "todo") return true;
   return (task.blockers ?? []).every((blocker) => blocker.state && terminalStateNames.has(normalize(blocker.state)));
+}
+
+function queueEntry(task: Task, reason: QueueReason, detail?: string, nextAttemptAt?: string): QueuedTask {
+  return {
+    taskId: task.id,
+    identifier: task.identifier,
+    reason,
+    ...(detail ? { detail } : {}),
+    ...(nextAttemptAt ? { nextAttemptAt } : {})
+  };
+}
+
+function compareCandidates(a: Task, b: Task): number {
+  const priority = (a.priority ?? 100) - (b.priority ?? 100);
+  if (priority !== 0) return priority;
+  return a.updatedAt.localeCompare(b.updatedAt);
+}
+
+function buildActiveMetrics(state: OrchestratorState, runsById: Map<string, Run>): ActiveRunMetric[] {
+  return state.activeClaims.map((claim) => {
+    const run = runsById.get(claim.runId);
+    return {
+      id: claim.runId,
+      taskId: claim.taskId,
+      identifier: claim.identifier,
+      startedAt: claim.startedAt,
+      ...(claim.lastEventAt ? { lastEventAt: claim.lastEventAt } : {}),
+      ...(run?.turnCount !== undefined ? { turnCount: run.turnCount } : {}),
+      ...(run?.inputTokens !== undefined ? { inputTokens: run.inputTokens } : {}),
+      ...(run?.outputTokens !== undefined ? { outputTokens: run.outputTokens } : {}),
+      ...(run?.totalTokens !== undefined ? { totalTokens: run.totalTokens } : {})
+    };
+  });
 }
 
 /**

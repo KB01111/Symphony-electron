@@ -93,3 +93,44 @@ test("fails rendering on unknown variables", async () => {
 
   await expect(service.renderPrompt(task())).rejects.toThrow(/missing/);
 });
+
+test("normalizes upstream-style GitHub, writeback, proof, and trust config", async () => {
+  const root = await tempRoot();
+  const workflowPath = path.join(root, "WORKFLOW.md");
+  await writeFile(
+    workflowPath,
+    [
+      "---",
+      "github:",
+      "  repository_url: https://github.com/acme/widgets",
+      "  default_branch: trunk",
+      "writeback:",
+      "  auto_create_pr: true",
+      "  auto_update_pr: true",
+      "  human_review_state: Review",
+      "proof:",
+      "  require_ci: true",
+      "trust:",
+      "  trusted_environment: true",
+      "  allowed_repositories:",
+      "    - https://github.com/acme/widgets",
+      "codex:",
+      "  turn_sandbox_policy:",
+      "    type: readOnly",
+      "    networkAccess: false",
+      "---",
+      "Ship {{ issue.identifier }}"
+    ].join("\n"),
+    "utf8"
+  );
+
+  const loaded = await new WorkflowService(workflowPath, {}).load();
+
+  expect(loaded.validation.ok).toBe(true);
+  expect(loaded.config.github).toMatchObject({ repositoryUrl: "https://github.com/acme/widgets", defaultBranch: "trunk" });
+  expect(loaded.config.writeback).toMatchObject({ autoCreatePr: true, autoUpdatePr: true, humanReviewStateName: "Review" });
+  expect(loaded.config.proof.requireCi).toBe(true);
+  expect(loaded.config.trust.trustedEnvironment).toBe(true);
+  expect(loaded.config.trust.allowedRepositories).toEqual(["https://github.com/acme/widgets"]);
+  expect(loaded.config.codex.turnSandboxPolicy).toMatchObject({ type: "readOnly", networkAccess: false });
+});

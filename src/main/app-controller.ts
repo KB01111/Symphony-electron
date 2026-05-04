@@ -1,7 +1,11 @@
 import path from "node:path";
 import type {
   CodexAccountStatus,
+  CreateIssueInput,
+  GitHubConfig,
+  GitHubPrStatus,
   HealthCheckResult,
+  LandingDecision,
   LinearConfig,
   OrchestratorState,
   Profile,
@@ -14,6 +18,9 @@ import type {
 import { ApprovalService } from "./services/approval-service.js";
 import { JsonlEventLog } from "./services/event-log.js";
 import { HandoffService } from "./services/handoff-service.js";
+import { GitHubService } from "./services/github-service.js";
+import { IntegrationWritebackService } from "./services/integration-writeback-service.js";
+import { LandingService } from "./services/landing-service.js";
 import { LinearClient } from "./services/linear-client.js";
 import { LinearConfigService } from "./services/linear-config-service.js";
 import { OrchestratorService } from "./services/orchestrator-service.js";
@@ -36,6 +43,9 @@ export class AppController {
   readonly approvals: ApprovalService;
   readonly proof: ProofStore;
   readonly handoff: HandoffService;
+  readonly github: GitHubService;
+  readonly landing: LandingService;
+  readonly writeback: IntegrationWritebackService;
   readonly workflow: WorkflowService;
   readonly orchestratorState: OrchestratorStateStore;
   readonly orchestrator: OrchestratorService;
@@ -50,10 +60,18 @@ export class AppController {
     this.approvals = new ApprovalService(appDataRoot);
     this.proof = new ProofStore(appDataRoot);
     this.handoff = new HandoffService();
+    this.github = new GitHubService();
+    this.landing = new LandingService();
+    this.writeback = new IntegrationWritebackService({
+      linear: this.linear,
+      eventLog: this.eventLog,
+      getLinearConfig: () => this.linearConfig.get()
+    });
     this.runs = new RunService(appDataRoot, this.eventLog, new WorkspaceManager({ workflow: this.workflow }), {
       approvals: this.approvals,
       proof: this.proof,
       onRunNeedsReview: (run) => this.markRunReadyForReview(run),
+      shouldContinueRun: (run, task) => this.shouldContinueRun(run, task),
       onLinearGraphql: async (payload) => {
         const config = await this.linearConfig.get();
         return this.linear.graphql(config, payload);
@@ -64,6 +82,11 @@ export class AppController {
       readState: () => this.orchestratorState.read(),
       writeState: (state) => this.orchestratorState.write(state),
       listCandidateTasks: () => this.refreshLinearCandidates(),
+      getIssueState: async (task) => {
+        const config = await this.linearConfig.get();
+        if (!config.apiKey || task.source !== "linear") return undefined;
+        return this.linear.getIssueState(config, task.externalId);
+      },
       listRuns: () => this.runs.list(),
       startRun: async (task) => {
         const profile = await this.selectHealthyProfile();
@@ -73,7 +96,14 @@ export class AppController {
         return this.runs.start(task, profile);
       },
       appendEvent: (runId, event) => this.eventLog.append(runId, event),
-      terminateRun: (runId) => this.runs.cancel(runId)
+      terminateRun: (runId) => this.runs.cancel(runId),
+      cleanWorkspace: async (task) => {
+        const runs = await this.runs.list();
+        const run = latestRunWithWorkspace(runs, task.id);
+        if (run?.workspacePath) {
+          await new WorkspaceManager({ workflow: this.workflow }).beforeRemove(run.workspacePath);
+        }
+      }
     });
   }
 
@@ -127,6 +157,13 @@ export class AppController {
     await this.linear.addComment(config, issueId, body);
   }
 
+  async createLinearIssue(input: CreateIssueInput): Promise<Task> {
+    const config = await this.linearConfig.get();
+    const issue = await this.linear.createIssue(config, input);
+    await this.tasks.upsertMany([issue]);
+    return issue;
+  }
+
   async workflowSnapshot(): Promise<WorkflowSnapshot> {
     const workflow = await this.workflow.snapshot();
     const config = await this.linearConfig.get();
@@ -135,7 +172,8 @@ export class AppController {
       pollIntervalSeconds: config.pollIntervalSeconds ?? workflow.pollIntervalSeconds,
       maxConcurrentRuns: config.maxConcurrentRuns ?? workflow.maxConcurrentRuns,
       activeStateNames: config.activeStateNames.length ? config.activeStateNames : workflow.activeStateNames,
-      terminalStateNames: config.terminalStateNames?.length ? config.terminalStateNames : workflow.terminalStateNames
+      terminalStateNames: config.terminalStateNames?.length ? config.terminalStateNames : workflow.terminalStateNames,
+      ...(config.repositoryUrl ?? workflow.repositoryUrl ? { repositoryUrl: config.repositoryUrl ?? workflow.repositoryUrl } : {})
     };
   }
 
@@ -233,23 +271,64 @@ export class AppController {
     return draft;
   }
 
+  async githubStatus(runId: string): Promise<GitHubPrStatus> {
+    const run = await this.runs.get(runId);
+    const task = await this.tasks.get(run.taskId);
+    const status = await this.github.status(run, task, githubConfigForTask(task));
+    await this.proof.add(runId, {
+      kind: "github_check",
+      label: "GitHub status",
+      status: status.checksStatus,
+      detail: status.detail,
+      source: "github-status",
+      ...(status.prUrl ? { url: status.prUrl } : {}),
+      metadata: { ...status }
+    });
+    return status;
+  }
+
+  async approveLanding(runId: string, reason?: string): Promise<LandingDecision> {
+    const run = await this.runs.get(runId);
+    const [task, orchestratorState] = await Promise.all([this.tasks.get(run.taskId), this.orchestratorState.read()]);
+    const status = await this.github.status(run, task, githubConfigForTask(task));
+    const decision = this.landing.approve(run, status, orchestratorState.policy, reason);
+    if (this.landing.canAutoMerge(orchestratorState.policy, status, decision) && status.prNumber) {
+      const config = githubConfigForTask(task);
+      if (config) {
+        await this.github.merge(config, status.prNumber);
+      }
+    }
+    await this.proof.add(runId, {
+      kind: "landing",
+      label: "Landing decision",
+      status: decision.approved ? "passed" : "warning",
+      detail: decision.reason ?? (decision.approved ? "Landing approved by operator." : "Run is not ready for landing."),
+      source: "landing-decision",
+      metadata: { ...decision }
+    });
+    await this.eventLog.append(runId, { type: "landing.decision", message: decision.approved ? "Landing approved." : "Landing not approved.", payload: decision });
+    return decision;
+  }
+
   private async markRunReadyForReview(run: Run): Promise<void> {
     try {
-      const [task, config] = await Promise.all([this.tasks.get(run.taskId), this.linearConfig.get()]);
-      if (task.source !== "linear" || !config.apiKey) return;
-      const body = [
-        `Symphony run ${run.id} completed and is ready for Human Review.`,
-        run.workspacePath ? `Workspace: ${run.workspacePath}` : "",
-        run.threadId ? `Codex thread: ${run.threadId}` : ""
-      ]
-        .filter(Boolean)
-        .join("\n");
-      await this.linear.addComment(config, task.externalId, body);
-      await this.linear.transitionIssue(config, task.externalId, config.humanReviewStateName ?? "Human Review", task.teamKey ?? config.teamKey);
-      await this.eventLog.append(run.id, { type: "linear.review_gate", message: `Moved ${task.identifier} to Human Review.` });
+      const task = await this.tasks.get(run.taskId);
+      await this.writeback.markRunReadyForReview(run, task);
     } catch (error) {
       await this.eventLog.append(run.id, { type: "linear.review_gate.failed", message: (error as Error).message });
     }
+  }
+
+  private async shouldContinueRun(run: Run, task: Task): Promise<boolean> {
+    const config = await this.linearConfig.get();
+    if (!config.apiKey || task.source !== "linear") return false;
+    const state = await this.linear.getIssueState(config, task.externalId);
+    if (!state) return false;
+    const terminalStateNames = (config.terminalStateNames ?? []).length === 0
+      ? ["Done", "Closed", "Cancelled", "Canceled", "Duplicate"]
+      : config.terminalStateNames ?? [];
+    const terminal = new Set(terminalStateNames.map((name) => name.trim().toLowerCase()));
+    return !terminal.has(state.status.trim().toLowerCase()) && (run.turnCount ?? 1) > 0;
   }
 }
 
@@ -268,4 +347,31 @@ function orchestratorSnapshotToSchedulerSnapshot(snapshot: Awaited<ReturnType<Or
     ...(snapshot.state.lastTickAt ? { lastPollAt: snapshot.state.lastTickAt } : {}),
     ...(snapshot.state.lastError ? { lastError: snapshot.state.lastError } : {})
   };
+}
+
+export function latestRunWithWorkspace(runs: Run[], taskId: string): Run | undefined {
+  return runs
+    .filter((run) => run.taskId === taskId && run.workspacePath && run.state !== "cancelled" && run.state !== "failed")
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+}
+
+export function githubConfigForTask(task: Task): GitHubConfig | undefined {
+  const repositoryUrl = task.repositoryUrl ?? inferRepositoryUrl(task.description);
+  if (!repositoryUrl) return undefined;
+  const match = repositoryUrl.match(/github\.com[:/](?<owner>[^/\s]+)\/(?<repo>[^/\s]+)(?:\.git)?/u);
+  const owner = match?.groups?.owner;
+  const repo = match?.groups?.repo;
+  if (!owner || !repo) return undefined;
+  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  return {
+    owner,
+    repo,
+    ...(token ? { token } : {})
+  };
+}
+
+function inferRepositoryUrl(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+  const match = text.match(/https?:\/\/github\.com\/[^\s/]+\/[^\s)]+/u);
+  return match?.[0]?.replace(/\/pull\/\d+.*/u, "");
 }

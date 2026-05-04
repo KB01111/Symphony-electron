@@ -92,3 +92,15 @@ test("returns empty array for run with no entries", async () => {
   const store = new ProofStore(await tempRoot(), () => "2026-05-02T10:00:00.000Z");
   expect(await store.list("nonexistent-run")).toEqual([]);
 });
+
+test("upserts proof entries by source and lists all entries", async () => {
+  const store = new ProofStore(await tempRoot(), () => "2026-05-02T10:00:00.000Z");
+
+  const first = await store.add("run-1", { kind: "github_check", label: "CI", status: "warning", detail: "pending", source: "checks" });
+  const second = await store.add("run-1", { kind: "github_check", label: "CI", status: "passed", detail: "green", source: "checks", url: "https://example.test/pr/1" });
+
+  expect(second.id).toBe(first.id);
+  expect(await store.list("run-1")).toMatchObject([{ id: first.id, status: "passed", detail: "green", url: "https://example.test/pr/1" }]);
+  expect(await store.listAll()).toHaveLength(1);
+  expect(await store.summary("run-1")).toContain("[passed] CI: green");
+});

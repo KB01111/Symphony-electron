@@ -79,6 +79,60 @@ test("does not dispatch while paused", async () => {
 
   expect(startRun).not.toHaveBeenCalled();
   expect(snapshot.queuedTaskIds).toEqual(["a"]);
+  expect(snapshot.queue).toMatchObject([{ taskId: "a", reason: "paused" }]);
+});
+
+test("reports queue reasons for blockers and concurrency", async () => {
+  let state: OrchestratorState = { ...defaultOrchestratorState(), policy: { ...defaultOrchestratorState().policy, maxConcurrentRuns: 1 } };
+  const service = new OrchestratorService({
+    readState: async () => state,
+    writeState: async (next) => {
+      state = next;
+    },
+    listCandidateTasks: async () => [task("active"), todoTask("blocked"), task("queued")],
+    listRuns: async () => [],
+    startRun: async (candidate) => run(`run-${candidate.id}`, candidate.id),
+    appendEvent: async () => undefined,
+    now: () => new Date("2026-05-02T10:00:00.000Z")
+  });
+
+  const snapshot = await service.tick();
+
+  expect(snapshot.state.activeClaims.map((claim) => claim.taskId)).toEqual(["active"]);
+  expect(snapshot.queue).toEqual([
+    expect.objectContaining({ taskId: "blocked", reason: "blocked" }),
+    expect.objectContaining({ taskId: "queued", reason: "concurrency" })
+  ]);
+  expect(snapshot.nextPollAt).toBe("2026-05-02T10:01:00.000Z");
+});
+
+test("reconciles tracker terminal state and cleans workspaces", async () => {
+  const cleaned: string[] = [];
+  let state: OrchestratorState = {
+    ...defaultOrchestratorState(),
+    activeClaims: [{ taskId: "a", runId: "run-a", identifier: "A", startedAt: "2026-05-02T10:00:00.000Z" }]
+  };
+  const service = new OrchestratorService({
+    readState: async () => state,
+    writeState: async (next) => {
+      state = next;
+    },
+    listCandidateTasks: async () => [task("a")],
+    getIssueState: async () => ({ status: "Done" }),
+    listRuns: async () => [{ ...run("run-a", "a", "running"), updatedAt: "2026-05-02T09:00:00.000Z" }],
+    startRun: async (candidate) => run(`run-${candidate.id}`, candidate.id),
+    appendEvent: async () => undefined,
+    terminateRun: async () => undefined,
+    cleanWorkspace: async (candidate) => {
+      cleaned.push(candidate.id);
+    },
+    now: () => new Date("2026-05-02T10:00:00.000Z")
+  });
+
+  const snapshot = await service.tick();
+
+  expect(snapshot.state.activeClaims).toEqual([]);
+  expect(cleaned).toEqual(["a"]);
 });
 
 test("existing active and preparing runs consume concurrency", async () => {
@@ -242,7 +296,7 @@ test("stale active claims are cancelled and retried with backoff", async () => {
       state = next;
     },
     listCandidateTasks: async () => [],
-    listRuns: async () => [run("run-a", "a", "running")],
+    listRuns: async () => [{ ...run("run-a", "a", "running"), updatedAt: "2026-05-02T09:00:00.000Z" }],
     startRun: async (candidate) => run(`run-${candidate.id}`, candidate.id),
     appendEvent: async () => undefined,
     terminateRun: async (runId) => {
@@ -263,6 +317,49 @@ test("stale active claims are cancelled and retried with backoff", async () => {
       lastError: "stalled"
     }
   ]);
+});
+
+test("uses the latest run activity timestamp when evaluating stalls", async () => {
+  let state: OrchestratorState = {
+    ...defaultOrchestratorState(),
+    activeClaims: [
+      {
+        taskId: "a",
+        runId: "run-a",
+        identifier: "A",
+        startedAt: "2026-05-02T09:00:00.000Z",
+        lastEventAt: "2026-05-02T09:00:00.000Z"
+      }
+    ],
+    policy: { ...defaultOrchestratorState().policy, stallTimeoutSeconds: 60 }
+  };
+  const cancelled: string[] = [];
+  const service = new OrchestratorService({
+    readState: async () => state,
+    writeState: async (next) => {
+      state = next;
+    },
+    listCandidateTasks: async () => [task("a")],
+    listRuns: async () => [{ ...run("run-a", "a", "running"), updatedAt: "2026-05-02T09:01:30.000Z" }],
+    startRun: async (candidate) => run(`run-${candidate.id}`, candidate.id),
+    appendEvent: async () => undefined,
+    terminateRun: async (runId) => {
+      cancelled.push(runId);
+    },
+    now: () => new Date("2026-05-02T09:02:01.000Z")
+  });
+
+  const snapshot = await service.tick();
+
+  expect(cancelled).toEqual([]);
+  expect(snapshot.state.activeClaims).toMatchObject([
+    {
+      taskId: "a",
+      runId: "run-a",
+      lastEventAt: "2026-05-02T09:01:30.000Z"
+    }
+  ]);
+  expect(snapshot.state.retryQueue).toEqual([]);
 });
 
 test("terminal tracker states cancel active claims without retry", async () => {

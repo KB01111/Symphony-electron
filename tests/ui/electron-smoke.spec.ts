@@ -11,7 +11,8 @@ test("packaged renderer shows the Symphony command center", async () => {
   await expect(page.getByText("Setup health")).toBeVisible();
   await expect(page.getByText("Approval queue")).toBeVisible();
   await expect(page.getByText("Proof of work")).toBeVisible();
+  await expect(page.getByText("Queue reasons")).toBeVisible();
+  await expect(page.getByText("Policy gates")).toBeVisible();
 
   await app.close();
 });
-

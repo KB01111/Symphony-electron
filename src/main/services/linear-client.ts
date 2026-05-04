@@ -1,4 +1,4 @@
-import type { HealthCheckResult, LinearConfig, Task } from "../../shared/types.js";
+import type { CreateIssueInput, HealthCheckResult, LinearConfig, Task } from "../../shared/types.js";
 import { isoNow } from "./time.js";
 
 type FetchLike = typeof fetch;
@@ -60,8 +60,34 @@ interface LinearWorkflowStatesResponse {
   errors?: Array<{ message: string }>;
 }
 
+interface LinearIssueResponse {
+  data?: {
+    issue?: LinearIssueNode | null;
+  };
+  errors?: Array<{ message: string }>;
+}
+
+interface LinearIssueCreateResponse {
+  data?: {
+    issueCreate?: {
+      success?: boolean;
+      issue?: LinearIssueNode | null;
+    };
+  };
+  errors?: Array<{ message: string }>;
+}
+
 interface LinearMutationResponse {
   data?: Record<string, { success?: boolean } | undefined>;
+  errors?: Array<{ message: string }>;
+}
+
+interface LinearTeamResponse {
+  data?: {
+    teams?: {
+      nodes?: Array<{ id: string; key: string }>;
+    };
+  };
   errors?: Array<{ message: string }>;
 }
 
@@ -120,6 +146,109 @@ export class LinearClient {
     } while (after);
 
     return tasks;
+  }
+
+  async getIssueState(config: LinearConfig, issueId: string): Promise<{ id: string; status: string; updatedAt?: string } | undefined> {
+    const payload = await this.graphql<LinearIssueResponse>(config, {
+      query: `
+        query SymphonyIssueState($issueId: String!) {
+          issue(id: $issueId) {
+            id updatedAt
+            state { name }
+          }
+        }
+      `,
+      variables: { issueId }
+    });
+    const issue = payload.data?.issue;
+    if (!issue) return undefined;
+    return {
+      id: issue.id,
+      status: issue.state?.name ?? "Unknown",
+      ...(issue.updatedAt ? { updatedAt: issue.updatedAt } : {})
+    };
+  }
+
+  async listTerminalIssues(config: LinearConfig): Promise<Task[]> {
+    const terminalConfig: LinearConfig = {
+      ...config,
+      activeStateNames: config.terminalStateNames?.length ? config.terminalStateNames : ["Done", "Closed", "Cancelled", "Canceled", "Duplicate"]
+    };
+    return this.listIssues(terminalConfig);
+  }
+
+  async resolveTeamId(config: LinearConfig, teamKey: string): Promise<string> {
+    const payload = await this.graphql<LinearTeamResponse>(config, {
+      query: `
+        query SymphonyTeam($key: String!) {
+          teams(filter: { key: { eq: $key } }, first: 1) {
+            nodes { id key }
+          }
+        }
+      `,
+      variables: { key: teamKey }
+    });
+    const team = payload.data?.teams?.nodes?.[0];
+    if (!team) {
+      throw new Error(`Linear team not found: ${teamKey}`);
+    }
+    return team.id;
+  }
+
+  async createIssue(config: LinearConfig, input: CreateIssueInput): Promise<Task> {
+    const effectiveTeamKey = input.teamKey ?? config.teamKey;
+    if (!effectiveTeamKey) {
+      throw new Error("Linear team key is required to create issues.");
+    }
+
+    // Resolve team key to UUID
+    const teamId = await this.resolveTeamId(config, effectiveTeamKey);
+
+    const states = input.stateName ? await this.listWorkflowStates(config, effectiveTeamKey) : [];
+    const state = input.stateName ? states.find((candidate) => candidate.name.toLowerCase() === input.stateName!.toLowerCase()) : undefined;
+    if (input.stateName && !state) {
+      throw new Error(`Linear workflow state not found: ${input.stateName}`);
+    }
+    const payload = await this.graphql<LinearIssueCreateResponse>(config, {
+      query: `
+        mutation SymphonyIssueCreate($input: IssueCreateInput!) {
+          issueCreate(input: $input) {
+            success
+            issue {
+              id identifier title description url priority branchName createdAt updatedAt
+              state { name }
+              assignee { name }
+              team { key }
+              project { name }
+              labels { nodes { name } }
+              relations {
+                nodes {
+                  type
+                  relatedIssue {
+                    id identifier createdAt updatedAt
+                    state { name }
+                  }
+                }
+              }
+            }
+          }
+        }
+      `,
+      variables: {
+        input: {
+          title: input.title,
+          ...(input.description ? { description: input.description } : {}),
+          teamId,
+          ...(state ? { stateId: state.id } : {}),
+          ...(input.parentIssueId ? { parentId: input.parentIssueId } : {})
+        }
+      }
+    });
+    const issue = payload.data?.issueCreate?.issue;
+    if (!issue) {
+      throw new Error("Linear issueCreate did not return an issue.");
+    }
+    return this.normalizeIssue(issue, config);
   }
 
   async listWorkflowStates(config: LinearConfig, teamKey?: string): Promise<LinearWorkflowState[]> {
@@ -224,14 +353,14 @@ export class LinearClient {
   private normalizeIssue(node: LinearIssueNode, config: LinearConfig): Task {
     const blockers = (node.relations?.nodes ?? [])
       .filter((relation) => relation.type === "blocks" || relation.type === "blocked")
-      .map((relation) => relation.relatedIssue)
-      .filter((relatedIssue): relatedIssue is NonNullable<typeof relatedIssue> => Boolean(relatedIssue))
-      .map((relatedIssue) => ({
-        ...(relatedIssue.id ? { id: relatedIssue.id } : {}),
-        ...(relatedIssue.identifier ? { identifier: relatedIssue.identifier } : {}),
-        ...(relatedIssue.state?.name ? { state: relatedIssue.state.name } : {}),
-        ...(relatedIssue.createdAt ? { createdAt: relatedIssue.createdAt } : {}),
-        ...(relatedIssue.updatedAt ? { updatedAt: relatedIssue.updatedAt } : {})
+      .filter((relation): relation is typeof relation & { relatedIssue: NonNullable<typeof relation.relatedIssue> } => Boolean(relation.relatedIssue))
+      .map((relation) => ({
+        ...(relation.relatedIssue.id ? { id: relation.relatedIssue.id } : {}),
+        ...(relation.relatedIssue.identifier ? { identifier: relation.relatedIssue.identifier } : {}),
+        ...(relation.relatedIssue.state?.name ? { state: relation.relatedIssue.state.name } : {}),
+        ...(relation.type ? { relationType: relation.type } : {}),
+        ...(relation.relatedIssue.createdAt ? { createdAt: relation.relatedIssue.createdAt } : {}),
+        ...(relation.relatedIssue.updatedAt ? { updatedAt: relation.relatedIssue.updatedAt } : {})
       }));
     const task: Task = {
       id: `linear:${node.id}`,
@@ -258,5 +387,5 @@ export class LinearClient {
 }
 
 function workflowStateCacheKey(config: LinearConfig, teamKey?: string): string {
-  return [config.teamKey ?? teamKey ?? "", config.projectName ?? "", config.projectSlug ?? ""].join("|");
+  return [teamKey ?? config.teamKey ?? "", config.projectName ?? "", config.projectSlug ?? ""].join("|");
 }

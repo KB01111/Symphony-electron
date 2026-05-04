@@ -32,6 +32,16 @@ test("normalizes Linear issues into local tasks", async () => {
                           createdAt: "2026-04-30T10:00:00.000Z",
                           updatedAt: "2026-05-01T09:00:00.000Z"
                         }
+                      },
+                      {
+                        type: "blocked",
+                        relatedIssue: {
+                          id: "lin-2",
+                          identifier: "ENG-43",
+                          state: { name: "In Progress" },
+                          createdAt: "2026-04-30T11:00:00.000Z",
+                          updatedAt: "2026-05-01T11:00:00.000Z"
+                        }
                       }
                     ]
                   },
@@ -72,9 +82,18 @@ test("normalizes Linear issues into local tasks", async () => {
         {
           id: "lin-0",
           identifier: "ENG-1",
+          relationType: "blocks",
           state: "Done",
           createdAt: "2026-04-30T10:00:00.000Z",
           updatedAt: "2026-05-01T09:00:00.000Z"
+        },
+        {
+          id: "lin-2",
+          identifier: "ENG-43",
+          relationType: "blocked",
+          state: "In Progress",
+          createdAt: "2026-04-30T11:00:00.000Z",
+          updatedAt: "2026-05-01T11:00:00.000Z"
         }
       ],
       branchName: "kevin/eng-42",
@@ -180,4 +199,3 @@ test("caches workflow states for repeated transitions", async () => {
 
   expect(stateFetches).toBe(1);
 });
-

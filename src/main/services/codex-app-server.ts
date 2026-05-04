@@ -7,6 +7,7 @@ import type { TurnStartResponse } from "../../generated/codex-app-server/v2/Turn
 import type { DynamicToolSpec } from "../../generated/codex-app-server/v2/DynamicToolSpec.js";
 import type { AskForApproval } from "../../generated/codex-app-server/v2/AskForApproval.js";
 import type { SandboxMode } from "../../generated/codex-app-server/v2/SandboxMode.js";
+import type { SandboxPolicy } from "../../generated/codex-app-server/v2/SandboxPolicy.js";
 import { CodexJsonRpcClient, type JsonRpcRequest } from "./codex-jsonrpc.js";
 
 export interface CodexAppServerOptions {
@@ -22,6 +23,7 @@ export interface CodexAppServerOptions {
   command?: string;
   approvalPolicy?: unknown;
   sandbox?: unknown;
+  turnSandboxPolicy?: unknown;
   baseInstructions?: string;
   readTimeoutMs?: number;
 }
@@ -31,6 +33,7 @@ export type CodexAppServerProcessFactory = (options: CodexAppServerOptions) => C
 export interface CodexAppServerProcessLike {
   readonly pid: number | undefined;
   startTurn(prompt: string, cwd: string): Promise<StartedTurn>;
+  continueTurn(threadId: string, prompt: string, cwd: string): Promise<StartedTurn>;
   close(): void;
 }
 
@@ -44,6 +47,7 @@ interface ThreadParamOptions {
   prompt: string;
   approvalPolicy?: unknown;
   sandbox?: unknown;
+  turnSandboxPolicy?: unknown;
   baseInstructions?: string;
   dynamicTools?: DynamicToolSpec[];
 }
@@ -54,13 +58,16 @@ export class CodexAppServerProcess implements CodexAppServerProcessLike {
   private readonly dynamicTools: DynamicToolSpec[];
   private readonly approvalPolicy: unknown;
   private readonly sandbox: unknown;
+  private readonly turnSandboxPolicy: unknown;
   private readonly baseInstructions: string | undefined;
   private readonly readTimeoutMs: number;
+  private initialized = false;
 
   constructor(options: CodexAppServerOptions) {
     this.dynamicTools = options.dynamicTools ?? defaultDynamicTools();
     this.approvalPolicy = options.approvalPolicy;
     this.sandbox = options.sandbox;
+    this.turnSandboxPolicy = options.turnSandboxPolicy;
     this.baseInstructions = options.baseInstructions;
     this.readTimeoutMs = options.readTimeoutMs ?? 5_000;
     const command = appServerCommand(options.command);
@@ -100,6 +107,39 @@ export class CodexAppServerProcess implements CodexAppServerProcessLike {
   }
 
   async startTurn(prompt: string, cwd: string): Promise<StartedTurn> {
+    await this.initialize();
+    const threadParams = buildThreadStartParams({
+      cwd,
+      prompt,
+      approvalPolicy: this.approvalPolicy,
+      sandbox: this.sandbox,
+      turnSandboxPolicy: this.turnSandboxPolicy,
+      dynamicTools: this.dynamicTools,
+      ...(this.baseInstructions ? { baseInstructions: this.baseInstructions } : {})
+    });
+    const thread = await requestWithTimeout(this.client.request<ThreadStartResponse>("thread/start", threadParams), this.readTimeoutMs);
+    return this.continueTurn(thread.thread.id, prompt, cwd);
+  }
+
+  async continueTurn(threadId: string, prompt: string, cwd: string): Promise<StartedTurn> {
+    await this.initialize();
+    const turnParams: TurnStartParams = {
+      threadId,
+      cwd,
+      approvalPolicy: normalizeApprovalPolicy(this.approvalPolicy),
+      sandboxPolicy: normalizeTurnSandboxPolicy(this.turnSandboxPolicy),
+      input: [{ type: "text", text: prompt, text_elements: [] }]
+    };
+    const turn = await requestWithTimeout(this.client.request<TurnStartResponse>("turn/start", turnParams), this.readTimeoutMs);
+    return { threadId, turnId: turn.turn.id };
+  }
+
+  close(): void {
+    this.client.close();
+  }
+
+  private async initialize(): Promise<void> {
+    if (this.initialized) return;
     const initializeParams: InitializeParams = {
       clientInfo: {
         name: "symphony-electron",
@@ -113,27 +153,7 @@ export class CodexAppServerProcess implements CodexAppServerProcessLike {
     };
     await requestWithTimeout(this.client.request("initialize", initializeParams), this.readTimeoutMs);
     this.client.notify("initialized");
-
-    const threadParams = buildThreadStartParams({
-      cwd,
-      prompt,
-      approvalPolicy: this.approvalPolicy,
-      sandbox: this.sandbox,
-      dynamicTools: this.dynamicTools,
-      ...(this.baseInstructions ? { baseInstructions: this.baseInstructions } : {})
-    });
-    const thread = await requestWithTimeout(this.client.request<ThreadStartResponse>("thread/start", threadParams), this.readTimeoutMs);
-    const turnParams: TurnStartParams = {
-      threadId: thread.thread.id,
-      cwd,
-      input: [{ type: "text", text: prompt, text_elements: [] }]
-    };
-    const turn = await requestWithTimeout(this.client.request<TurnStartResponse>("turn/start", turnParams), this.readTimeoutMs);
-    return { threadId: thread.thread.id, turnId: turn.turn.id };
-  }
-
-  close(): void {
-    this.client.close();
+    this.initialized = true;
   }
 }
 
@@ -209,6 +229,13 @@ function normalizeSandbox(value: unknown): SandboxMode {
     return value;
   }
   return "workspace-write";
+}
+
+function normalizeTurnSandboxPolicy(value: unknown): SandboxPolicy | null {
+  if (isRecord(value) && typeof value.type === "string") {
+    return value as SandboxPolicy;
+  }
+  return null;
 }
 
 /**

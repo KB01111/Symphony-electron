@@ -99,6 +99,7 @@ test("uses fallback text when proof array is empty", () => {
   });
 
   expect(handoff.body).toContain("- [unknown] No proof entries were recorded.");
+  expect(handoff.landingAllowed).toBe(false);
 });
 
 test("uses fallback text when transcript summary is absent", () => {
@@ -147,4 +148,56 @@ test("formats multiple proof entries with their respective statuses", () => {
   expect(handoff.body).toContain("- [warning] lint: 2 warnings");
   // Should not contain the fallback
   expect(handoff.body).not.toContain("No proof entries were recorded.");
+});
+
+test("includes PR, complexity, walkthrough, and landing metadata", () => {
+  const proof: ProofEntry[] = [
+    { id: "p1", runId: "run-1", kind: "pr", label: "Pull request", status: "passed", detail: "opened", url: "https://github.com/acme/widgets/pull/1", createdAt: "2026-05-02T10:00:00.000Z" },
+    { id: "p2", runId: "run-1", kind: "complexity", label: "Complexity", status: "passed", detail: "Medium", createdAt: "2026-05-02T10:00:00.000Z" },
+    { id: "p3", runId: "run-1", kind: "walkthrough_video", label: "Walkthrough", status: "passed", detail: "Recorded", url: "https://videos.example.test/1", createdAt: "2026-05-02T10:00:00.000Z" }
+  ];
+
+  const handoff = new HandoffService(() => "2026-05-02T10:31:00.000Z").build({ task: { ...task(), branchName: "devin/eng-42" }, run: run(), proof });
+
+  expect(handoff.prUrl).toBe("https://github.com/acme/widgets/pull/1");
+  expect(handoff.branchName).toBe("devin/eng-42");
+  expect(handoff.landingAllowed).toBe(true);
+  expect(handoff.body).toContain("Complexity: Medium");
+  expect(handoff.body).toContain("Walkthrough: https://videos.example.test/1");
+  expect(handoff.body).toContain("Land only after explicit operator acceptance");
+});
+
+test("does not allow landing when any proof failed", () => {
+  const handoff = new HandoffService().build({
+    task: task(),
+    run: run(),
+    proof: [
+      { id: "p1", runId: "run-1", kind: "test", label: "unit tests", status: "passed", detail: "10 passed", createdAt: "2026-05-02T10:00:00.000Z" },
+      { id: "p2", runId: "run-1", kind: "ci", label: "CI pipeline", status: "failed", detail: "build failed", createdAt: "2026-05-02T10:01:00.000Z" }
+    ]
+  });
+
+  expect(handoff.landingAllowed).toBe(false);
+});
+
+test("does not allow landing when run state is not review even with passing proofs", () => {
+  const handoff = new HandoffService().build({
+    task: task(),
+    run: { ...run(), state: "running" },
+    proof: [
+      { id: "p1", runId: "run-1", kind: "test", label: "unit tests", status: "passed", detail: "10 passed", createdAt: "2026-05-02T10:00:00.000Z" }
+    ]
+  });
+
+  expect(handoff.landingAllowed).toBe(false);
+});
+
+test("does not allow landing for incomplete proof statuses", () => {
+  const handoff = new HandoffService().build({
+    task: task(),
+    run: run(),
+    proof: [{ id: "p1", runId: "run-1", kind: "ci", label: "CI pipeline", status: "unknown", detail: "pending", createdAt: "2026-05-02T10:01:00.000Z" }]
+  });
+
+  expect(handoff.landingAllowed).toBe(false);
 });
