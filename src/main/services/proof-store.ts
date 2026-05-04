@@ -24,7 +24,7 @@ export class ProofStore {
   }
 
   async add(runId: string, input: ProofInput): Promise<ProofEntry> {
-    const existing = input.source ? (await this.store.read()).find((entry) => entry.runId === runId && entry.source === input.source) : undefined;
+    const existing = input.source ? (await this.store.read()).find((entry) => entry.runId === runId && entry.source === input.source && entry.kind === input.kind) : undefined;
     if (existing) {
       return this.patch(existing.id, input);
     }

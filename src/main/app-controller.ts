@@ -349,7 +349,7 @@ function orchestratorSnapshotToSchedulerSnapshot(snapshot: Awaited<ReturnType<Or
 function githubConfigForTask(task: Task): GitHubConfig | undefined {
   const repositoryUrl = task.repositoryUrl ?? inferRepositoryUrl(task.description);
   if (!repositoryUrl) return undefined;
-  const match = repositoryUrl.match(/github\.com[:/](?<owner>[^/\s]+)\/(?<repo>[^/\s.]+)(?:\.git)?/u);
+  const match = repositoryUrl.match(/github\.com[:/](?<owner>[^/\s]+)\/(?<repo>[^/\s]+)(?:\.git)?/u);
   const owner = match?.groups?.owner;
   const repo = match?.groups?.repo;
   if (!owner || !repo) return undefined;

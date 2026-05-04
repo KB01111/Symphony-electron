@@ -1,3 +1,4 @@
+import path from "path";
 import type { AutomationPolicy, LinearConfig, Run, Task } from "../../shared/types.js";
 import type { JsonlEventLog } from "./event-log.js";
 import type { LinearClient } from "./linear-client.js";
@@ -25,7 +26,7 @@ export class IntegrationWritebackService {
   private async writeLinearReviewGate(config: LinearConfig, run: Run, task: Task): Promise<void> {
     const body = [
       `Symphony run ${run.id} completed and is ready for Human Review.`,
-      run.workspacePath ? `Workspace: ${run.workspacePath}` : "",
+      run.workspacePath ? `Workspace: ${path.basename(run.workspacePath)}` : "",
       run.threadId ? `Codex thread: ${run.threadId}` : "",
       run.turnCount ? `Turns: ${run.turnCount}` : "",
       run.totalTokens ? `Total tokens: ${run.totalTokens}` : ""
