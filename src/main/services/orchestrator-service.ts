@@ -190,11 +190,27 @@ export class OrchestratorService {
       if (!run) continue;
       const task = candidatesById.get(claim.taskId);
       if (!ACTIVE_RUN_STATES.has(run.state)) continue;
-      const refreshedState = task && this.dependencies.getIssueState ? await this.dependencies.getIssueState(task).catch(() => undefined) : undefined;
+
+      // Always check tracker state for active claims, even if task is not in candidates
+      let refreshedState: { status: string; updatedAt?: string } | undefined;
+      let taskForLookup: Task | undefined = task;
+      if (this.dependencies.getIssueState) {
+        // If task is not in candidates, construct a minimal task object for lookup
+        if (!taskForLookup && claim.identifier) {
+          taskForLookup = { id: claim.taskId, identifier: claim.identifier } as Task;
+        }
+        if (taskForLookup) {
+          refreshedState = await this.dependencies.getIssueState(taskForLookup).catch(() => undefined);
+        }
+      }
+
       const effectiveStatus = refreshedState?.status ?? task?.status;
-      if (task && effectiveStatus && terminalStateNames.has(normalize(effectiveStatus))) {
+      if (effectiveStatus && terminalStateNames.has(normalize(effectiveStatus))) {
         await this.cancelClaim(claim.runId, "tracker_terminal", "Tracker moved to a terminal state.");
-        await this.dependencies.cleanWorkspace?.(task);
+        const taskToClean = taskForLookup ?? task;
+        if (taskToClean) {
+          await this.dependencies.cleanWorkspace?.(taskToClean);
+        }
         continue;
       }
       const lastActivityAt = newerIso(claim.lastEventAt, run.updatedAt) ?? claim.startedAt;
