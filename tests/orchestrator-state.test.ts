@@ -145,6 +145,14 @@ test("cloneAutomationPolicy does not share maxConcurrentRunsByState reference", 
   expect(b.policy.maxConcurrentRunsByState).not.toHaveProperty("in_progress");
 });
 
+test("cloneAutomationPolicy does not share allowedRepositories reference", () => {
+  const a = defaultOrchestratorState();
+  const b = defaultOrchestratorState();
+
+  a.policy.allowedRepositories.push("https://github.com/acme/widgets");
+  expect(b.policy.allowedRepositories).toEqual([]);
+});
+
 test("store read backfills maxConcurrentRunsByState default when missing from persisted state", async () => {
   const root = await tempRoot();
   const stateDir = path.join(root, "state");

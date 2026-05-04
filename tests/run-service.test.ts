@@ -362,3 +362,33 @@ test("continues Codex turns while tracker issue remains active", async () => {
   expect(turnIds).toEqual(["turn-1", "turn-2"]);
   expect(await service.get(run.id)).toMatchObject({ turnCount: 2, turnId: "turn-2", state: "review" });
 });
+
+test("marks the run failed when continuing a turn fails", async () => {
+  const root = await tempRoot();
+  await writeFile(path.join(root, "WORKFLOW.md"), "---\nagent:\n  max_turns: 2\n---\nHandle {{identifier}}", "utf8");
+  let completion: (() => void) | undefined;
+  const close = vi.fn();
+  const service = new RunService(root, new JsonlEventLog(path.join(root, "logs")), new WorkspaceManager({ workflowPath: path.join(root, "WORKFLOW.md") }), {
+    shouldContinueRun: async () => true,
+    createCodexProcess: (options) => ({
+      get pid() {
+        return undefined;
+      },
+      startTurn: async () => {
+        completion = () => options.onNotification?.("turn/completed", { turn: { id: "turn-1" } });
+        return { threadId: "thread-1", turnId: "turn-1" };
+      },
+      continueTurn: async () => {
+        throw new Error("network unavailable");
+      },
+      close
+    })
+  });
+
+  const run = await service.start(task(), profile(root));
+  await vi.waitFor(() => expect(completion).toBeDefined());
+  completion?.();
+
+  await vi.waitFor(async () => expect(await service.get(run.id)).toMatchObject({ state: "failed", failureReason: "network unavailable" }));
+  expect(close).toHaveBeenCalled();
+});

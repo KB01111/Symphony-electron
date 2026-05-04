@@ -127,7 +127,8 @@ export class OrchestratorService {
         await this.dependencies.cleanWorkspace?.(task);
         continue;
       }
-      const lastActivity = new Date(claim.lastEventAt ?? run.updatedAt ?? claim.startedAt).getTime();
+      const lastActivityAt = newerIso(claim.lastEventAt, run.updatedAt) ?? claim.startedAt;
+      const lastActivity = new Date(lastActivityAt).getTime();
       const stalled = next.policy.stallTimeoutSeconds > 0 && now.getTime() - lastActivity > next.policy.stallTimeoutSeconds * 1000;
       if (stalled) {
         await this.cancelClaim(claim.runId, "orchestrator.stalled", "Run exceeded stall timeout.");

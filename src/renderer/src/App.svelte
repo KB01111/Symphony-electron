@@ -85,6 +85,7 @@
   $: reviewRuns = runs.filter((run) => run.state === "review");
   $: pendingApprovals = approvals.filter((approval) => approval.status === "pending");
   $: queueReasons = orchestrator?.queue ?? [];
+  $: safeGithubPrUrl = safeExternalUrl(githubStatus?.prUrl);
 
   let cleanupRunEvents: (() => void) | undefined;
   let cleanupTranscriptEvents: (() => void) | undefined;
@@ -307,6 +308,16 @@
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean);
+  }
+
+  function safeExternalUrl(value: string | undefined): string | undefined {
+    if (!value) return undefined;
+    try {
+      const url = new URL(value);
+      return url.protocol === "https:" || url.protocol === "http:" ? url.href : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   function badgeTone(value: string): "neutral" | "good" | "warn" | "bad" | "info" {
@@ -717,8 +728,10 @@
                     <div class="rounded-md border border-stone-300 bg-stone-50 p-3 text-sm">
                       <p class="font-medium">PR and review status</p>
                       <p class="mt-1 text-stone-600">{githubStatus?.detail ?? "Sync PR/check status to populate GitHub proof."}</p>
-                      {#if githubStatus?.prUrl}
-                        <a class="mt-2 block break-all text-blue-700 underline" href={githubStatus.prUrl} target="_blank" rel="noreferrer">{githubStatus.prUrl}</a>
+                      {#if safeGithubPrUrl}
+                        <a class="mt-2 block break-all text-blue-700 underline" href={safeGithubPrUrl} target="_blank" rel="noreferrer">{safeGithubPrUrl}</a>
+                      {:else if githubStatus?.prUrl}
+                        <p class="mt-2 break-all text-xs text-stone-500">{githubStatus.prUrl}</p>
                       {/if}
                     </div>
                     <div class="rounded-md border border-stone-300 bg-stone-50 p-3 text-sm">

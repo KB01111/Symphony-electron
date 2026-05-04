@@ -15,6 +15,7 @@ export class HandoffService {
     const pr = input.proof.find((entry) => entry.kind === "pr" || entry.kind === "github_check");
     const complexity = input.proof.find((entry) => entry.kind === "complexity");
     const walkthrough = input.proof.find((entry) => entry.kind === "walkthrough_video");
+    const hasPassingProof = input.proof.length > 0 && input.proof.every((entry) => entry.status !== "failed");
     const proofLines = input.proof.length
       ? input.proof.map((entry) => `- [${entry.status}] ${entry.label}: ${entry.detail}${entry.url ? ` (${entry.url})` : ""}`).join("\n")
       : "- [unknown] No proof entries were recorded.";
@@ -51,7 +52,7 @@ export class HandoffService {
       ...(pr?.url ? { prUrl: pr.url } : {}),
       proofSummary: proofLines,
       diffSummary: input.proof.find((entry) => entry.kind === "diff")?.detail ?? "Diff summary was not recorded.",
-      landingAllowed: input.run.state === "review" && input.proof.every((entry) => entry.status !== "failed")
+      landingAllowed: input.run.state === "review" && hasPassingProof
     };
   }
 }

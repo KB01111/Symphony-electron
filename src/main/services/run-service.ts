@@ -155,7 +155,9 @@ export class RunService {
         onNotification: (method, params) => {
           const handled = this.enqueueNotification(run.id, () => this.handleCodexNotification(run.id, method, params));
           if (method === "turn/completed") {
-            void handled.finally(() => this.handleTurnCompleted(run.id)).catch(() => {});
+            void handled
+              .then(() => this.handleTurnCompleted(run.id))
+              .catch((error) => this.failRun(run.id, error));
           }
         },
         onServerRequest: (request) => this.handleServerRequest(run.id, request),
@@ -185,22 +187,28 @@ export class RunService {
         updatedAt: isoNow()
       });
     } catch (error) {
-      this.active.get(run.id)?.close();
-      this.active.delete(run.id);
-      this.runContexts.delete(run.id);
-      await this.cleanupApprovalWaitersForRun(run.id);
-      const failed = await this.get(run.id).catch(() => run);
-      if (failed.workspacePath) {
-        await this.safeWorkspaceAfterRun(failed.workspacePath);
-      }
-      await this.patch(run.id, {
-        state: "failed",
-        completedAt: isoNow(),
-        failureReason: (error as Error).message,
-        updatedAt: isoNow()
-      });
-      await this.eventLog.append(run.id, { type: "run.failed", message: (error as Error).message });
+      await this.failRun(run.id, error, run);
     }
+  }
+
+  private async failRun(runId: string, error: unknown, fallbackRun?: Run): Promise<void> {
+    const message = errorMessage(error);
+    this.active.get(runId)?.close();
+    this.active.delete(runId);
+    this.runContexts.delete(runId);
+    await this.cleanupApprovalWaitersForRun(runId);
+    const failed = await this.get(runId).catch(() => fallbackRun);
+    if (failed?.state === "cancelled" || failed?.state === "done" || failed?.state === "failed" || failed?.state === "review") return;
+    if (failed?.workspacePath) {
+      await this.safeWorkspaceAfterRun(failed.workspacePath);
+    }
+    await this.patch(runId, {
+      state: "failed",
+      completedAt: isoNow(),
+      failureReason: message,
+      updatedAt: isoNow()
+    });
+    await this.eventLog.append(runId, { type: "run.failed", message });
   }
 
   private async handleExit(runId: string, exitCode: number | null, signal: NodeJS.Signals | null): Promise<void> {
@@ -511,6 +519,10 @@ function continuePrompt(task: Task, turnCount: number, maxTurns: number): string
     `This is autonomous turn ${turnCount} of ${maxTurns}.`,
     "If the issue is fully resolved, summarize proof and stop; otherwise continue implementation and verification."
   ].join("\n");
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function extractTokenUsage(value: unknown): { inputTokens?: number; outputTokens?: number; totalTokens?: number } {

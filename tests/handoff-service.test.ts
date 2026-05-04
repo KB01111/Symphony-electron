@@ -99,6 +99,7 @@ test("uses fallback text when proof array is empty", () => {
   });
 
   expect(handoff.body).toContain("- [unknown] No proof entries were recorded.");
+  expect(handoff.landingAllowed).toBe(false);
 });
 
 test("uses fallback text when transcript summary is absent", () => {
@@ -164,4 +165,17 @@ test("includes PR, complexity, walkthrough, and landing metadata", () => {
   expect(handoff.body).toContain("Complexity: Medium");
   expect(handoff.body).toContain("Walkthrough: https://videos.example.test/1");
   expect(handoff.body).toContain("Land only after explicit operator acceptance");
+});
+
+test("does not allow landing when any proof failed", () => {
+  const handoff = new HandoffService().build({
+    task: task(),
+    run: run(),
+    proof: [
+      { id: "p1", runId: "run-1", kind: "test", label: "unit tests", status: "passed", detail: "10 passed", createdAt: "2026-05-02T10:00:00.000Z" },
+      { id: "p2", runId: "run-1", kind: "ci", label: "CI pipeline", status: "failed", detail: "build failed", createdAt: "2026-05-02T10:01:00.000Z" }
+    ]
+  });
+
+  expect(handoff.landingAllowed).toBe(false);
 });
